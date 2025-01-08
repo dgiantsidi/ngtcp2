@@ -114,7 +114,7 @@ std::string make_status_body(unsigned int status_code, uint64_t timestamp) {
   body += "</address>";
   body += "</body></html>";
   #endif
-  std::cout << __PRETTY_FUNCTION__ << " ---> body=" << body << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << " ---> body=" << body << "\n";
   return body;
 }
 } // namespace
@@ -296,7 +296,7 @@ nghttp3_ssize  read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec
                         void *stream_user_data) {
   auto stream = static_cast<Stream *>(stream_user_data);
 
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
   vec[0].base = stream->data;
   // auto ts = util::timestamp();
   // ::memcpy(stream->data, )
@@ -372,7 +372,7 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
                                  unsigned int status_code, uint64_t timestamp,
                                  const std::vector<HTTPHeader> &extra_headers) {
   status_resp_body = make_status_body(status_code, timestamp);
-  std::cout << __PRETTY_FUNCTION__ << ": ---> " << status_code << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << ": ---> " << status_code << "\n";
   auto status_code_str = util::format_uint(status_code);
   auto content_length_str = util::format_uint(status_resp_body.size());
 
@@ -424,12 +424,12 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
 int Stream::send_redirect_response(nghttp3_conn *httpconn,
                                    unsigned int status_code,
                                    const std::string_view &path) {
-  std::cout << __PRETTY_FUNCTION__ << "  \n";
+  // std::cout << __PRETTY_FUNCTION__ << "  \n";
   return send_status_response(httpconn, status_code, 0, {{"location", path}});
 }
 
 int Stream::start_response(nghttp3_conn *httpconn, uint64_t timestamp) {
-  std::cout << __PRETTY_FUNCTION__ << "  \n";
+  // std::cout << __PRETTY_FUNCTION__ << "  \n";
   // TODO This should be handled by nghttp3
   if (method == "PUT") {
     return send_status_response(httpconn, 200, timestamp);
@@ -1023,13 +1023,13 @@ void Handler::extend_max_remote_streams_bidi(uint64_t max_streams) {
 namespace {
 int http_recv_data(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
                    size_t datalen, void *user_data, void *stream_user_data) {
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
   if (!config.quiet && !config.no_http_dump) {
     debug::print_http_data(stream_id, {data, datalen});
   }
   auto h = static_cast<Handler *>(user_data);
 
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+ // std::cout << __PRETTY_FUNCTION__ << "\n";
   auto it = h->streams_.find(stream_id);
   assert(it != std::end(h->streams_));
   auto &stream = (*it).second;
@@ -1129,8 +1129,8 @@ int http_end_request_headers(nghttp3_conn *conn, int64_t stream_id, int fin,
 } // namespace
 
 int Handler::http_end_request_headers(Stream *stream) {
-  std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() <<
-  "\n";
+ // std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() <<
+  //"\n";
   if (config.early_response) {
     if (start_response(stream) != 0) {
       return -1;
@@ -1147,7 +1147,7 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
   
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
-  std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
 
   if (h->http_end_stream(stream) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
@@ -1158,7 +1158,7 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
 
 int Handler::http_end_stream(Stream *stream) {
   // TODO: HERE PROCESS the stream->dev
-  std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
   char buf[7];
   ::memcpy(buf, stream->data_vec.data(), 6);
   buf[6] = '\0';
@@ -1167,9 +1167,9 @@ int Handler::http_end_stream(Stream *stream) {
   for (auto i = 0ULL; i < stream->data_vec.size(); i++) {
     //std::cout << stream->data_vec[i];
   }
-  std::cout << "buf=" << buf << ", timestamp=" << timestamp << "\n";
-  std::cout << "\n\n";
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+ // std::cout << "buf=" << buf << ", timestamp=" << timestamp << "\n";
+  //std::cout << "\n\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
   if (!config.early_response) {
     return start_response(stream, timestamp);
   }
@@ -1177,7 +1177,7 @@ int Handler::http_end_stream(Stream *stream) {
 }
 
 int Handler::start_response(Stream *stream, uint64_t timestamp) {
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
   return stream->start_response(httpconn_, timestamp);
 }
 
@@ -1185,7 +1185,7 @@ namespace {
 int http_acked_stream_data(nghttp3_conn *conn, int64_t stream_id,
                            uint64_t datalen, void *user_data,
                            void *stream_user_data) {
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << "\n";
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
   h->http_acked_stream_data(stream, datalen);
@@ -1194,7 +1194,7 @@ int http_acked_stream_data(nghttp3_conn *conn, int64_t stream_id,
 } // namespace
 
 void Handler::http_acked_stream_data(Stream *stream, uint64_t datalen) {
-  std::cout << __PRETTY_FUNCTION__ << ", datalen=" << datalen << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << ", datalen=" << datalen << "\n";
 
   stream->http_acked_stream_data(datalen);
 
@@ -1765,7 +1765,7 @@ int Handler::write_streams() {
 
   ngtcp2_path_storage_zero(&ps);
   ngtcp2_path_storage_zero(&prev_ps);
-  std::cout << __PRETTY_FUNCTION__ << " ================> txbuf.size()=" << txbuf.size() << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << " ================> txbuf.size()=" << txbuf.size() << "\n";
   for (;;) {
     int64_t stream_id = -1;
     int fin = 0;
@@ -2154,8 +2154,8 @@ int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
     return -1;
   }
   total_consumed_bytes += data.size();
-  std::cout << __PRETTY_FUNCTION__ << " nconsumed=" << nconsumed << " data.size()=" << data.size() << "\n";
-  std::cout << __PRETTY_FUNCTION__ << " total_consumed_bytes=" << total_consumed_bytes << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << " nconsumed=" << nconsumed << " data.size()=" << data.size() << "\n";
+  //std::cout << __PRETTY_FUNCTION__ << " total_consumed_bytes=" << total_consumed_bytes << "\n";
   ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
   ngtcp2_conn_extend_max_offset(conn_, nconsumed);
 
