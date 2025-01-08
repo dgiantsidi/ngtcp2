@@ -82,18 +82,23 @@ Stream::Stream(int64_t stream_id, Handler *handler)
     datalen(0),
     dynresp(false),
     dyndataleft(0),
-    dynbuflen(0) {}
+    dynbuflen(0) {
+    data = new uint8_t[sizeof(uint64_t)];
+    }
 
 namespace {
 constexpr auto NGTCP2_SERVER = "nghttp3/ngtcp2 server"sv;
 } // namespace
 
 namespace {
-std::string make_status_body(unsigned int status_code) {
+std::string make_status_body(unsigned int status_code, uint64_t timestamp) {
+  status_code = status_code;
   auto status_string = util::format_uint(status_code);
   auto reason_phrase = http::get_reason_phrase(status_code);
 
   std::string body;
+  body =status_string + " " + reason_phrase + std::to_string(timestamp);
+  #if 0
   body = "<html><head><title>";
   body += status_string;
   body += ' ';
@@ -108,6 +113,8 @@ std::string make_status_body(unsigned int status_code) {
   body += util::format_uint(config.port);
   body += "</address>";
   body += "</body></html>";
+  #endif
+  std::cout << __PRETTY_FUNCTION__ << " ---> body=" << body << "\n";
   return body;
 }
 } // namespace
@@ -123,13 +130,10 @@ struct Request {
 namespace {
 Request request_path(const std::string_view &uri, bool is_connect) {
   urlparse_url u;
-  Request req{
-    .pri =
-      {
-        .urgency = -1,
-        .inc = -1,
-      },
-  };
+  Request req;
+
+  req.pri.urgency = -1;
+  req.pri.inc = -1;
 
   if (auto rv = urlparse_parse_url(uri.data(), uri.size(), is_connect, &u);
       rv != 0) {
@@ -287,12 +291,15 @@ int64_t Stream::find_dyn_length(const std::string_view &path) {
 }
 
 namespace {
-nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
+nghttp3_ssize  read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         size_t veccnt, uint32_t *pflags, void *user_data,
                         void *stream_user_data) {
   auto stream = static_cast<Stream *>(stream_user_data);
 
+  std::cout << __PRETTY_FUNCTION__ << "\n";
   vec[0].base = stream->data;
+  // auto ts = util::timestamp();
+  // ::memcpy(stream->data, )
   vec[0].len = stream->datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
   if (config.send_trailers) {
@@ -362,10 +369,10 @@ void Stream::http_acked_stream_data(uint64_t datalen) {
 }
 
 int Stream::send_status_response(nghttp3_conn *httpconn,
-                                 unsigned int status_code,
+                                 unsigned int status_code, uint64_t timestamp,
                                  const std::vector<HTTPHeader> &extra_headers) {
-  status_resp_body = make_status_body(status_code);
-
+  status_resp_body = make_status_body(status_code, timestamp);
+  std::cout << __PRETTY_FUNCTION__ << ": ---> " << status_code << "\n";
   auto status_code_str = util::format_uint(status_code);
   auto content_length_str = util::format_uint(status_resp_body.size());
 
@@ -383,9 +390,8 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
   data = (uint8_t *)status_resp_body.data();
   datalen = status_resp_body.size();
 
-  nghttp3_data_reader dr{
-    .read_data = read_data,
-  };
+  nghttp3_data_reader dr{};
+  dr.read_data = read_data;
 
   if (auto rv = nghttp3_conn_submit_response(httpconn, stream_id, nva.data(),
                                              nva.size(), &dr);
@@ -418,11 +424,17 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
 int Stream::send_redirect_response(nghttp3_conn *httpconn,
                                    unsigned int status_code,
                                    const std::string_view &path) {
-  return send_status_response(httpconn, status_code, {{"location", path}});
+  std::cout << __PRETTY_FUNCTION__ << "  \n";
+  return send_status_response(httpconn, status_code, 0, {{"location", path}});
 }
 
-int Stream::start_response(nghttp3_conn *httpconn) {
+int Stream::start_response(nghttp3_conn *httpconn, uint64_t timestamp) {
+  std::cout << __PRETTY_FUNCTION__ << "  \n";
   // TODO This should be handled by nghttp3
+  if (method == "PUT") {
+    return send_status_response(httpconn, 200, timestamp);
+  }
+  std::cout << "=============================== Should not reach at this point ===============================\n";
   if (uri.empty() || method.empty()) {
     return send_status_response(httpconn, 400);
   }
@@ -657,7 +669,7 @@ Handler::Handler(struct ev_loop *loop, Server *server)
     } {
   ev_io_init(&wev_, writecb, 0, EV_WRITE);
   wev_.data = this;
-  ev_timer_init(&timer_, timeoutcb, 0., 0.);
+  ev_timer_init(&timer_, timeoutcb, 1000., 0.);
   timer_.data = this;
 }
 
@@ -1011,10 +1023,19 @@ void Handler::extend_max_remote_streams_bidi(uint64_t max_streams) {
 namespace {
 int http_recv_data(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
                    size_t datalen, void *user_data, void *stream_user_data) {
+  std::cout << __PRETTY_FUNCTION__ << "\n";
   if (!config.quiet && !config.no_http_dump) {
     debug::print_http_data(stream_id, {data, datalen});
   }
   auto h = static_cast<Handler *>(user_data);
+
+  std::cout << __PRETTY_FUNCTION__ << "\n";
+  auto it = h->streams_.find(stream_id);
+  assert(it != std::end(h->streams_));
+  auto &stream = (*it).second;
+  for (auto i = 0ULL; i < datalen; i++)
+    stream->data_vec.push_back(data[i]);
+
   h->http_consume(stream_id, datalen);
   return 0;
 }
@@ -1031,6 +1052,7 @@ int http_deferred_consume(nghttp3_conn *conn, int64_t stream_id,
 } // namespace
 
 void Handler::http_consume(int64_t stream_id, size_t nconsumed) {
+  
   ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
   ngtcp2_conn_extend_max_offset(conn_, nconsumed);
 }
@@ -1107,6 +1129,8 @@ int http_end_request_headers(nghttp3_conn *conn, int64_t stream_id, int fin,
 } // namespace
 
 int Handler::http_end_request_headers(Stream *stream) {
+  std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() <<
+  "\n";
   if (config.early_response) {
     if (start_response(stream) != 0) {
       return -1;
@@ -1120,8 +1144,11 @@ int Handler::http_end_request_headers(Stream *stream) {
 namespace {
 int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
                     void *stream_user_data) {
+  
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
+  std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
+
   if (h->http_end_stream(stream) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }
@@ -1130,20 +1157,35 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
 } // namespace
 
 int Handler::http_end_stream(Stream *stream) {
+  // TODO: HERE PROCESS the stream->dev
+  std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
+  char buf[7];
+  ::memcpy(buf, stream->data_vec.data(), 6);
+  buf[6] = '\0';
+  uint64_t timestamp;
+  ::memcpy(&timestamp, stream->data_vec.data()+6, sizeof(timestamp));
+  for (auto i = 0ULL; i < stream->data_vec.size(); i++) {
+    //std::cout << stream->data_vec[i];
+  }
+  std::cout << "buf=" << buf << ", timestamp=" << timestamp << "\n";
+  std::cout << "\n\n";
+  std::cout << __PRETTY_FUNCTION__ << "\n";
   if (!config.early_response) {
-    return start_response(stream);
+    return start_response(stream, timestamp);
   }
   return 0;
 }
 
-int Handler::start_response(Stream *stream) {
-  return stream->start_response(httpconn_);
+int Handler::start_response(Stream *stream, uint64_t timestamp) {
+  std::cout << __PRETTY_FUNCTION__ << "\n";
+  return stream->start_response(httpconn_, timestamp);
 }
 
 namespace {
 int http_acked_stream_data(nghttp3_conn *conn, int64_t stream_id,
                            uint64_t datalen, void *user_data,
                            void *stream_user_data) {
+  std::cout << __PRETTY_FUNCTION__ << "\n";
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
   h->http_acked_stream_data(stream, datalen);
@@ -1152,6 +1194,8 @@ int http_acked_stream_data(nghttp3_conn *conn, int64_t stream_id,
 } // namespace
 
 void Handler::http_acked_stream_data(Stream *stream, uint64_t datalen) {
+  std::cout << __PRETTY_FUNCTION__ << ", datalen=" << datalen << "\n";
+
   stream->http_acked_stream_data(datalen);
 
   ngtcp2_conn_info ci;
@@ -1266,17 +1310,21 @@ int Handler::setup_httpconn() {
   }
 
   nghttp3_callbacks callbacks{
-    .acked_stream_data = ::http_acked_stream_data,
-    .stream_close = ::http_stream_close,
-    .recv_data = ::http_recv_data,
-    .deferred_consume = ::http_deferred_consume,
-    .begin_headers = ::http_begin_request_headers,
-    .recv_header = ::http_recv_request_header,
-    .end_headers = ::http_end_request_headers,
-    .stop_sending = ::http_stop_sending,
-    .end_stream = ::http_end_stream,
-    .reset_stream = ::http_reset_stream,
-    .recv_settings = ::http_recv_settings,
+    ::http_acked_stream_data, // acked_stream_data
+    ::http_stream_close,
+    ::http_recv_data,
+    ::http_deferred_consume,
+    ::http_begin_request_headers,
+    ::http_recv_request_header,
+    ::http_end_request_headers,
+    nullptr, // begin_trailers
+    nullptr, // recv_trailer
+    nullptr, // end_trailers
+    ::http_stop_sending,
+    ::http_end_stream,
+    ::http_reset_stream,
+    nullptr, // shutdown
+    ::http_recv_settings,
   };
   nghttp3_settings settings;
   nghttp3_settings_default(&settings);
@@ -1409,30 +1457,45 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
                   std::span<const uint8_t> token, ngtcp2_token_type token_type,
                   uint32_t version, TLSServerContext &tls_ctx) {
   auto callbacks = ngtcp2_callbacks{
-    .recv_client_initial = ngtcp2_crypto_recv_client_initial_cb,
-    .recv_crypto_data = ::recv_crypto_data,
-    .handshake_completed = ::handshake_completed,
-    .encrypt = ngtcp2_crypto_encrypt_cb,
-    .decrypt = ngtcp2_crypto_decrypt_cb,
-    .hp_mask = do_hp_mask,
-    .recv_stream_data = ::recv_stream_data,
-    .acked_stream_data_offset = ::acked_stream_data_offset,
-    .stream_open = stream_open,
-    .stream_close = stream_close,
-    .rand = rand,
-    .get_new_connection_id = get_new_connection_id,
-    .remove_connection_id = remove_connection_id,
-    .update_key = ::update_key,
-    .path_validation = path_validation,
-    .stream_reset = ::stream_reset,
-    .extend_max_remote_streams_bidi = ::extend_max_remote_streams_bidi,
-    .extend_max_stream_data = ::extend_max_stream_data,
-    .delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
-    .delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
-    .get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb,
-    .stream_stop_sending = stream_stop_sending,
-    .version_negotiation = ngtcp2_crypto_version_negotiation_cb,
-    .recv_tx_key = ::recv_tx_key,
+    nullptr, // client_initial
+    ngtcp2_crypto_recv_client_initial_cb,
+    ::recv_crypto_data,
+    ::handshake_completed,
+    nullptr, // recv_version_negotiation
+    ngtcp2_crypto_encrypt_cb,
+    ngtcp2_crypto_decrypt_cb,
+    do_hp_mask,
+    ::recv_stream_data,
+    ::acked_stream_data_offset,
+    stream_open,
+    stream_close,
+    nullptr, // recv_stateless_reset
+    nullptr, // recv_retry
+    nullptr, // extend_max_local_streams_bidi
+    nullptr, // extend_max_local_streams_uni
+    rand,
+    get_new_connection_id,
+    remove_connection_id,
+    ::update_key,
+    path_validation,
+    nullptr, // select_preferred_addr
+    ::stream_reset,
+    ::extend_max_remote_streams_bidi,
+    nullptr, // extend_max_remote_streams_uni
+    ::extend_max_stream_data,
+    nullptr, // dcid_status
+    nullptr, // handshake_confirmed
+    nullptr, // recv_new_token
+    ngtcp2_crypto_delete_crypto_aead_ctx_cb,
+    ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
+    nullptr, // recv_datagram
+    nullptr, // ack_datagram
+    nullptr, // lost_datagram
+    ngtcp2_crypto_get_path_challenge_data_cb,
+    stream_stop_sending,
+    ngtcp2_crypto_version_negotiation_cb,
+    nullptr, // recv_rx_key
+    ::recv_tx_key,
   };
 
   scid_.datalen = NGTCP2_SV_SCIDLEN;
@@ -1558,17 +1621,15 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
   }
 
   auto path = ngtcp2_path{
-    .local =
-      {
-        .addr = const_cast<sockaddr *>(&local_addr.su.sa),
-        .addrlen = local_addr.len,
-      },
-    .remote =
-      {
-        .addr = const_cast<sockaddr *>(sa),
-        .addrlen = salen,
-      },
-    .user_data = const_cast<Endpoint *>(&ep),
+    {
+      const_cast<sockaddr *>(&local_addr.su.sa),
+      local_addr.len,
+    },
+    {
+      const_cast<sockaddr *>(sa),
+      salen,
+    },
+    const_cast<Endpoint *>(&ep),
   };
   if (auto rv =
         ngtcp2_conn_server_new(&conn_, dcid, &scid_, &path, version, &callbacks,
@@ -1596,17 +1657,15 @@ int Handler::feed_data(const Endpoint &ep, const Address &local_addr,
                        const ngtcp2_pkt_info *pi,
                        std::span<const uint8_t> data) {
   auto path = ngtcp2_path{
-    .local =
-      {
-        .addr = const_cast<sockaddr *>(&local_addr.su.sa),
-        .addrlen = local_addr.len,
-      },
-    .remote =
-      {
-        .addr = const_cast<sockaddr *>(sa),
-        .addrlen = salen,
-      },
-    .user_data = const_cast<Endpoint *>(&ep),
+    {
+      const_cast<sockaddr *>(&local_addr.su.sa),
+      local_addr.len,
+    },
+    {
+      const_cast<sockaddr *>(sa),
+      salen,
+    },
+    const_cast<Endpoint *>(&ep),
   };
 
   if (auto rv = ngtcp2_conn_read_pkt(conn_, &path, pi, data.data(), data.size(),
@@ -1706,7 +1765,7 @@ int Handler::write_streams() {
 
   ngtcp2_path_storage_zero(&ps);
   ngtcp2_path_storage_zero(&prev_ps);
-
+  std::cout << __PRETTY_FUNCTION__ << " ================> txbuf.size()=" << txbuf.size() << "\n";
   for (;;) {
     int64_t stream_id = -1;
     int fin = 0;
@@ -2074,6 +2133,7 @@ void Handler::update_timer() {
 
 int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
                               std::span<const uint8_t> data) {
+  static int total_consumed_bytes = 0;
   if (!config.quiet && !config.no_quic_dump) {
     debug::print_stream_data(stream_id, data);
   }
@@ -2093,7 +2153,9 @@ int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
       0);
     return -1;
   }
-
+  total_consumed_bytes += data.size();
+  std::cout << __PRETTY_FUNCTION__ << " nconsumed=" << nconsumed << " data.size()=" << data.size() << "\n";
+  std::cout << __PRETTY_FUNCTION__ << " total_consumed_bytes=" << total_consumed_bytes << "\n";
   ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
   ngtcp2_conn_extend_max_offset(conn_, nconsumed);
 
@@ -2237,13 +2299,13 @@ void Server::close() {
 namespace {
 int create_sock(Address &local_addr, const char *addr, const char *port,
                 int family) {
-  addrinfo hints{
-    .ai_flags = AI_PASSIVE,
-    .ai_family = family,
-    .ai_socktype = SOCK_DGRAM,
-  };
+  addrinfo hints{};
   addrinfo *res, *rp;
   int val = 1;
+
+  hints.ai_family = family;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_flags = AI_PASSIVE;
 
   if (strcmp(addr, "*") == 0) {
     addr = nullptr;
@@ -2439,20 +2501,18 @@ int Server::on_read(Endpoint &ep) {
   size_t pktcnt = 0;
   ngtcp2_pkt_info pi;
 
-  iovec msg_iov{
-    .iov_base = buf.data(),
-    .iov_len = buf.size(),
-  };
+  iovec msg_iov;
+  msg_iov.iov_base = buf.data();
+  msg_iov.iov_len = buf.size();
+
+  msghdr msg{};
+  msg.msg_name = &su;
+  msg.msg_iov = &msg_iov;
+  msg.msg_iovlen = 1;
 
   uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(in6_pktinfo)) +
                    CMSG_SPACE(sizeof(int))];
-
-  msghdr msg{
-    .msg_name = &su,
-    .msg_iov = &msg_iov,
-    .msg_iovlen = 1,
-    .msg_control = msg_ctrl,
-  };
+  msg.msg_control = msg_ctrl;
 
   for (; pktcnt < 10;) {
     msg.msg_namelen = sizeof(su);
@@ -2756,12 +2816,12 @@ int Server::send_version_negotiation(uint32_t version,
   buf.push(nwrite);
 
   ngtcp2_addr laddr{
-    .addr = const_cast<sockaddr *>(&local_addr.su.sa),
-    .addrlen = local_addr.len,
+    const_cast<sockaddr *>(&local_addr.su.sa),
+    local_addr.len,
   };
   ngtcp2_addr raddr{
-    .addr = const_cast<sockaddr *>(sa),
-    .addrlen = salen,
+    const_cast<sockaddr *>(sa),
+    salen,
   };
 
   if (send_packet(ep, laddr, raddr, /* ecn = */ 0, buf.data()) !=
@@ -2829,12 +2889,12 @@ int Server::send_retry(const ngtcp2_pkt_hd *chd, Endpoint &ep,
   buf.push(nwrite);
 
   ngtcp2_addr laddr{
-    .addr = const_cast<sockaddr *>(&local_addr.su.sa),
-    .addrlen = local_addr.len,
+    const_cast<sockaddr *>(&local_addr.su.sa),
+    local_addr.len,
   };
   ngtcp2_addr raddr{
-    .addr = const_cast<sockaddr *>(sa),
-    .addrlen = salen,
+    const_cast<sockaddr *>(sa),
+    salen,
   };
 
   if (send_packet(ep, laddr, raddr, /* ecn = */ 0, buf.data()) !=
@@ -2863,12 +2923,12 @@ int Server::send_stateless_connection_close(const ngtcp2_pkt_hd *chd,
   buf.push(nwrite);
 
   ngtcp2_addr laddr{
-    .addr = const_cast<sockaddr *>(&local_addr.su.sa),
-    .addrlen = local_addr.len,
+    const_cast<sockaddr *>(&local_addr.su.sa),
+    local_addr.len,
   };
   ngtcp2_addr raddr{
-    .addr = const_cast<sockaddr *>(sa),
-    .addrlen = salen,
+    const_cast<sockaddr *>(sa),
+    salen,
   };
 
   if (send_packet(ep, laddr, raddr, /* ecn = */ 0, buf.data()) !=
@@ -2938,12 +2998,12 @@ int Server::send_stateless_reset(size_t pktlen, std::span<const uint8_t> dcid,
   buf.push(nwrite);
 
   ngtcp2_addr laddr{
-    .addr = const_cast<sockaddr *>(&local_addr.su.sa),
-    .addrlen = local_addr.len,
+    const_cast<sockaddr *>(&local_addr.su.sa),
+    local_addr.len,
   };
   ngtcp2_addr raddr{
-    .addr = const_cast<sockaddr *>(sa),
-    .addrlen = salen,
+    const_cast<sockaddr *>(sa),
+    salen,
   };
 
   if (send_packet(ep, laddr, raddr, /* ecn = */ 0, buf.data()) !=
@@ -3081,22 +3141,23 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     return {{}, 0};
   }
 
-  iovec msg_iov{
-    .iov_base = const_cast<uint8_t *>(data.data()),
-    .iov_len = data.size(),
-  };
+  iovec msg_iov;
+  msg_iov.iov_base = const_cast<uint8_t *>(data.data());
+  msg_iov.iov_len = data.size();
+
+  msghdr msg{};
+  msg.msg_name = const_cast<sockaddr *>(remote_addr.addr);
+  msg.msg_namelen = remote_addr.addrlen;
+  msg.msg_iov = &msg_iov;
+  msg.msg_iovlen = 1;
 
   uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(uint16_t)) +
-                   CMSG_SPACE(sizeof(in6_pktinfo))]{};
+                   CMSG_SPACE(sizeof(in6_pktinfo))];
 
-  msghdr msg{
-    .msg_name = const_cast<sockaddr *>(remote_addr.addr),
-    .msg_namelen = remote_addr.addrlen,
-    .msg_iov = &msg_iov,
-    .msg_iovlen = 1,
-    .msg_control = msg_ctrl,
-    .msg_controllen = sizeof(msg_ctrl),
-  };
+  memset(msg_ctrl, 0, sizeof(msg_ctrl));
+
+  msg.msg_control = msg_ctrl;
+  msg.msg_controllen = sizeof(msg_ctrl);
 
   size_t controllen = 0;
 
@@ -3108,10 +3169,9 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     cm->cmsg_level = IPPROTO_IP;
     cm->cmsg_type = IP_PKTINFO;
     cm->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
+    in_pktinfo pktinfo{};
     auto addrin = reinterpret_cast<sockaddr_in *>(local_addr.addr);
-    in_pktinfo pktinfo{
-      .ipi_spec_dst = addrin->sin_addr,
-    };
+    pktinfo.ipi_spec_dst = addrin->sin_addr;
     memcpy(CMSG_DATA(cm), &pktinfo, sizeof(pktinfo));
 
     break;
@@ -3121,10 +3181,9 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     cm->cmsg_level = IPPROTO_IPV6;
     cm->cmsg_type = IPV6_PKTINFO;
     cm->cmsg_len = CMSG_LEN(sizeof(in6_pktinfo));
+    in6_pktinfo pktinfo{};
     auto addrin = reinterpret_cast<sockaddr_in6 *>(local_addr.addr);
-    in6_pktinfo pktinfo{
-      .ipi6_addr = addrin->sin6_addr,
-    };
+    pktinfo.ipi6_addr = addrin->sin6_addr;
     memcpy(CMSG_DATA(cm), &pktinfo, sizeof(pktinfo));
 
     break;
@@ -3281,11 +3340,9 @@ int parse_host_port(Address &dest, int af, const char *first,
   std::array<char, NI_MAXHOST> host;
   *std::copy(host_begin, host_end, std::begin(host)) = '\0';
 
-  addrinfo hints{
-    .ai_family = af,
-    .ai_socktype = SOCK_DGRAM,
-  };
-  addrinfo *res;
+  addrinfo hints{}, *res;
+  hints.ai_family = af;
+  hints.ai_socktype = SOCK_DGRAM;
 
   if (auto rv = getaddrinfo(host.data(), svc_begin, &hints, &res); rv != 0) {
     std::cerr << "getaddrinfo: [" << host.data() << "]:" << svc_begin << ": "
@@ -3317,33 +3374,32 @@ void print_usage() {
 
 namespace {
 void config_set_default(Config &config) {
-  auto path = realpath(".", nullptr);
-  assert(path);
-  auto htdocs = std::string(path);
-  free(path);
-
-  config = Config{
-    .tx_loss_prob = 0.,
-    .rx_loss_prob = 0.,
-    .ciphers = util::crypto_default_ciphers(),
-    .groups = util::crypto_default_groups(),
-    .htdocs = std::move(htdocs),
-    .mime_types_file = "/etc/mime.types"sv,
-    .timeout = 30 * NGTCP2_SECONDS,
-    .max_data = 1_m,
-    .max_stream_data_bidi_remote = 256_k,
-    .max_stream_data_uni = 256_k,
-    .max_streams_bidi = 100,
-    .max_streams_uni = 3,
-    .max_window = 6_m,
-    .max_stream_window = 6_m,
-    .max_dyn_length = 20_m,
-    .cc_algo = NGTCP2_CC_ALGO_CUBIC,
-    .initial_rtt = NGTCP2_DEFAULT_INITIAL_RTT,
-    .handshake_timeout = UINT64_MAX,
-    .ack_thresh = 2,
-    .initial_pkt_num = UINT32_MAX,
-  };
+  config = Config{};
+  config.tx_loss_prob = 0.;
+  config.rx_loss_prob = 0.;
+  config.ciphers = util::crypto_default_ciphers();
+  config.groups = util::crypto_default_groups();
+  config.timeout = 30 * NGTCP2_SECONDS;
+  {
+    auto path = realpath(".", nullptr);
+    assert(path);
+    config.htdocs = path;
+    free(path);
+  }
+  config.mime_types_file = "/etc/mime.types"sv;
+  config.max_data = 1_m;
+  config.max_stream_data_bidi_remote = 256_k;
+  config.max_stream_data_uni = 256_k;
+  config.max_window = 6_m;
+  config.max_stream_window = 6_m;
+  config.max_streams_bidi = 100;
+  config.max_streams_uni = 3;
+  config.max_dyn_length = 20_m;
+  config.cc_algo = NGTCP2_CC_ALGO_CUBIC;
+  config.initial_rtt = NGTCP2_DEFAULT_INITIAL_RTT;
+  config.handshake_timeout = UINT64_MAX;
+  config.ack_thresh = 2;
+  config.initial_pkt_num = UINT32_MAX;
 }
 } // namespace
 
@@ -3578,8 +3634,7 @@ int main(int argc, char **argv) {
       {"ack-thresh", required_argument, &flag, 30},
       {"initial-pkt-num", required_argument, &flag, 31},
       {"pmtud-probes", required_argument, &flag, 32},
-      {},
-    };
+      {nullptr, 0, nullptr, 0}};
 
     auto optidx = 0;
     auto c = getopt_long(argc, argv, "d:hqr:st:V", long_opts, &optidx);

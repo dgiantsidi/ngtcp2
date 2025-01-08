@@ -64,10 +64,10 @@ struct FileEntry;
 struct Stream {
   Stream(int64_t stream_id, Handler *handler);
 
-  int start_response(nghttp3_conn *conn);
+  int start_response(nghttp3_conn *conn, uint64_t timestamp = 0);
   std::pair<FileEntry, int> open_file(const std::string &path);
   void map_file(const FileEntry &fe);
-  int send_status_response(nghttp3_conn *conn, unsigned int status_code,
+  int send_status_response(nghttp3_conn *conn, unsigned int status_code, uint64_t timestamp = 0,
                            const std::vector<HTTPHeader> &extra_headers = {});
   int send_redirect_response(nghttp3_conn *conn, unsigned int status_code,
                              const std::string_view &path);
@@ -91,6 +91,7 @@ struct Stream {
   uint64_t dyndataleft;
   // dynbuflen is the number of bytes in-flight.
   uint64_t dynbuflen;
+  std::vector<uint8_t> data_vec;
 };
 
 class Server;
@@ -154,7 +155,7 @@ public:
                                 nghttp3_rcbuf *name, nghttp3_rcbuf *value);
   int http_end_request_headers(Stream *stream);
   int http_end_stream(Stream *stream);
-  int start_response(Stream *stream);
+  int start_response(Stream *stream, uint64_t timestamp =0);
   int on_stream_reset(int64_t stream_id);
   int on_stream_stop_sending(int64_t stream_id);
   int extend_max_stream_data(int64_t stream_id, uint64_t max_data);
@@ -171,6 +172,7 @@ public:
                        std::span<const uint8_t> data, size_t gso_size);
   void start_wev_endpoint(const Endpoint &ep);
   int send_blocked_packet();
+  std::unordered_map<int64_t, std::unique_ptr<Stream>> streams_;
 
 private:
   struct ev_loop *loop_;
@@ -180,7 +182,6 @@ private:
   FILE *qlog_;
   ngtcp2_cid scid_;
   nghttp3_conn *httpconn_;
-  std::unordered_map<int64_t, std::unique_ptr<Stream>> streams_;
   // conn_closebuf_ contains a packet which contains CONNECTION_CLOSE.
   // This packet is repeatedly sent as a response to the incoming
   // packet in draining period.

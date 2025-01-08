@@ -1887,10 +1887,10 @@ int Client::on_stream_stop_sending(int64_t stream_id) {
 }
 
 int Client::make_stream_early() {
-  std::cout << __PRETTY_FUNCTION__ << "\n";
   if (setup_httpconn() != 0) {
     return -1;
   }
+  std::cout << __PRETTY_FUNCTION__ << "\n";
   return on_extend_max_streams();
 }
 
@@ -1949,11 +1949,7 @@ namespace {
 nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         size_t veccnt, uint32_t *pflags, void *user_data,
                         void *stream_user_data) {
-  // @dimitra: add timestamp
-  auto ts = util::timestamp();
-  std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
   vec[0].base = config.data;
-  ::memcpy((config.data + 6), &ts, sizeof(ts));
   vec[0].len = config.datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
 
@@ -2026,16 +2022,9 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     server_reply += buffer;
   }
   std::cout << "\n [" << server_reply << "]\n";
-  if (server_reply.find("200 OK") == 0) {
+  if (server_reply.compare("200 OK") == 0) {
     acks.fetch_add(1);
     std::cout << acks.load() << "\n";
-    uint64_t timestamp = 0;
-    std::string timestamp_str(server_reply.data()+6, server_reply.size()-6);
-    std::cout << timestamp_str << "\n";
-    timestamp = std::stoull(timestamp_str);
-    auto now = util::timestamp();
-    auto latency = now -timestamp;
-    std::cout << __PRETTY_FUNCTION__ << " " << timestamp <<  "ns, latency=" << latency << " ns \n";
   }
   else {
     std::cout << "do not match\n";
@@ -2431,7 +2420,7 @@ int run(Client &c, const char *addr, const char *port,
         TLSClientContext &tls_ctx) {
   Address remote_addr, local_addr;
 
-  std::cout << __PRETTY_FUNCTION__ << " ---> START\n";
+  std::cout << __PRETTY_FUNCTION__ << "\n";
   auto fd = create_sock(remote_addr, addr, port);
   if (fd == -1) {
     return -1;
@@ -2466,7 +2455,7 @@ int run(Client &c, const char *addr, const char *port,
     return rv;
   }
   std::cout << __PRETTY_FUNCTION__ << " <<<<<<<<<<<<<<<<<<<<<< " << "c.on_write()" << " >>>>>>>>>>>>>>>>>>>>>>>\n";
-  ev_run(EV_DEFAULT, 0);
+  //ev_run(EV_DEFAULT, 0);
   std::cout << __PRETTY_FUNCTION__ << " ---> END\n";
   return 0;
 }
@@ -3347,9 +3336,8 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  std::cout << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
   if (data_path) {
-    std::cout << "HERE\n";
+    std::cout << __PRETTY_FUNCTION__ << " data_path exists\n";
     auto fd = open(data_path, O_RDONLY);
     if (fd == -1) {
       std::cerr << "data: Could not open file " << data_path << ": "
@@ -3371,13 +3359,10 @@ int main(int argc, char **argv) {
                   << strerror(errno) << std::endl;
         exit(EXIT_FAILURE);
       }
-      config.data = new uint8_t[24]; // static_cast<uint8_t *>(addr);
-      config.datalen = 24;
-      config.data[0] = 'P';config.data[1] = 'U';config.data[2] = 'T';config.data[3] = ' ';config.data[4] = 'X';config.data[5] = ' ';
+      config.data = static_cast<uint8_t *>(addr);
     }
     std::cout << "config.fd="<< config.fd << " config.datalen=" << config.datalen << "\n";
   }
-  std::cout << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
 
   auto addr = argv[optind++];
   auto port = argv[optind++];
@@ -3439,6 +3424,7 @@ int main(int argc, char **argv) {
       exit(EXIT_FAILURE);
     }
 
+    std::cout << " >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> count=" << count++ << "\n";
     if (config.preferred_versions.empty()) {
       break;
     }
