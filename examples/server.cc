@@ -3638,6 +3638,8 @@ int main(int argc, char **argv) {
 
     auto optidx = 0;
     auto c = getopt_long(argc, argv, "d:hqr:st:V", long_opts, &optidx);
+    config.quiet = true;
+
     if (c == -1) {
       break;
     }
