@@ -90,7 +90,7 @@ static std::tuple<double, double> compute_avg_latency(const std::map<int, std::u
 
     std::cout << "Average Latency: " << mean_latency << " ns" << std::endl;
     std::cout << "Variance: " << variance << " ns^2" << std::endl;
-    std::cout << "Standard Deviation: " << standard_deviation << " ms" << std::endl;
+    std::cout << "Standard Deviation: " << standard_deviation << " ns" << std::endl;
     return {mean_latency, standard_deviation};
 
 }
@@ -726,7 +726,7 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
                  TLSClientContext &tls_ctx) {
   endpoints_.reserve(4);
 
-  std::cout <<__PRETTY_FUNCTION__ << " START\n";
+  // std::cout <<__PRETTY_FUNCTION__ << " START\n";
   endpoints_.emplace_back();
   auto &ep = endpoints_.back();
   ep.addr = local_addr;
@@ -916,7 +916,7 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
     return -1;
   }
 
-  std::cout << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>> " << __PRETTY_FUNCTION__ << ": tls_session_.init() ---> >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
+  // std::cout << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>> " << __PRETTY_FUNCTION__ << ": tls_session_.init() ---> >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
   ngtcp2_conn_set_tls_native_handle(conn_, tls_session_.get_native_handle());
 
   if (early_data_ && config.tp_file) {
@@ -936,11 +936,11 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
       }
     }
   }
-  std::cout <<__PRETTY_FUNCTION__ << " MIDDLE 1\n";
+  // std::cout <<__PRETTY_FUNCTION__ << " MIDDLE 1\n";
   ev_io_start(loop_, &ep.rev);
-  std::cout <<__PRETTY_FUNCTION__ << " MIDDLE 2\n";
+  // std::cout <<__PRETTY_FUNCTION__ << " MIDDLE 2\n";
   ev_signal_start(loop_, &sigintev_);
-  std::cout <<__PRETTY_FUNCTION__ << " END\n";
+  // std::cout <<__PRETTY_FUNCTION__ << " END\n";
   return 0;
 }
 
@@ -1948,6 +1948,9 @@ std::atomic<int> acks = {0};
 static std::tuple<bool, int> wait_until_received_ack(int cur_req_no) {
   // @dimitra: todo check the latencies table 
    auto cur_acked_req_id = acks.load();
+   if (latencies_table.size() == 0) {
+    return {true, cur_acked_req_id};
+   }
    auto it = latencies_table.end();
    --it;
    if ((it->second->acked != true) && (cur_req_no == cur_acked_req_id)) {
@@ -2006,7 +2009,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         void *stream_user_data) {
   // @dimitra: add timestamp
   auto ts = util::timestamp();
-  std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
+  // std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
   vec[0].base = config.data;
   ::memcpy((config.data + 6), &ts, sizeof(ts));
   latencies_table.insert(std::make_pair(stream_id, std::make_unique<statistics>()));
@@ -2086,7 +2089,8 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
   // std::cout << "\n [" << server_reply << "]\n";
   if (server_reply.find("200 OK") == 0) {
     acks.fetch_add(1);
-    std::cout << "acks no=" << acks.load() << "\n";
+    if (acks.load()%100000 == 0) 
+      std::cout << "acks no=" << acks.load() << "\n";
     uint64_t timestamp = 0;
     std::string timestamp_str(server_reply.data()+6, server_reply.size()-6);
     // std::cout << timestamp_str << "\n";
@@ -2099,7 +2103,7 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
       std::cerr << __PRETTY_FUNCTION__ << " timestamps do not match \n";
       exit(-1);
     }
-    std::cout << __PRETTY_FUNCTION__ << " " << timestamp <<  "ns, latency=" << latency << " ns \n";
+    // std::cout << __PRETTY_FUNCTION__ << " " << timestamp <<  "ns, latency=" << latency << " ns \n";
   }
   else {
     //std::cout << "do not match\n";
@@ -2592,7 +2596,7 @@ namespace {
 int parse_requests(char **argv, size_t argvlen) {
   auto uri = argv[0];
   // for (size_t i = 0; i < argvlen; ++i)
-  for (size_t i = 0; i < 10000; ++i) {
+  for (size_t i = 0; i < 4e6; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
@@ -2944,6 +2948,8 @@ int main(int argc, char **argv) {
 
     auto optidx = 0;
     auto c = getopt_long(argc, argv, "d:him:n:qr:st:v:", long_opts, &optidx);
+    config.quiet = true;
+
     if (c == -1) {
       break;
     }
