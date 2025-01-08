@@ -55,6 +55,54 @@
 using namespace ngtcp2;
 using namespace std::literals;
 
+struct statistics {
+  uint64_t req_id;
+  uint64_t tx_timestamp;
+  uint64_t ack_timestamp;
+  friend std::ostream& operator << (std::ostream& os, const statistics& stats) {
+    os << "(" << std:: dec << stats.tx_timestamp << ", " << std:: dec << stats.ack_timestamp << ", computed latency= " << (stats.ack_timestamp-stats.tx_timestamp) << "ns )";
+    return os;
+  }
+};
+
+std::map<int, std::unique_ptr<statistics>> latencies_table;
+
+static std::tuple<double, double> compute_avg_latency(const std::map<int, std::unique_ptr<statistics>>& m) {
+  // Compute the average latency and standard deviation
+    uint64_t sum = 0;
+    for (auto& elem : m) {
+      auto latency = elem.second->ack_timestamp - elem.second->tx_timestamp;
+      sum+= latency;
+    }
+    double mean_latency = (1.0*sum)/m.size();
+    
+    // Compute the variance
+    double variance = 0.0;
+    for (auto& elem : m) {
+      auto latency = elem.second->ack_timestamp - elem.second->tx_timestamp;
+      variance += (latency - mean_latency) * (latency - mean_latency);
+    }
+    variance /= m.size();
+
+    // Compute the standard deviation
+    double standard_deviation = std::sqrt(variance);
+
+    std::cout << "Average Latency: " << mean_latency << " ns" << std::endl;
+    std::cout << "Variance: " << variance << " ns^2" << std::endl;
+    std::cout << "Standard Deviation: " << standard_deviation << " ms" << std::endl;
+    return {mean_latency, standard_deviation};
+
+}
+
+std::ostream& operator << (std::ostream& os, const std::map<int, std::unique_ptr<statistics>>& m) {
+  os << "[\n";
+  for (auto& elem : m) {
+    os << std::dec << elem.first << " : " << *(elem.second) << "\n";
+  }
+  os << "]\n";
+  return os;
+}
+
 namespace {
 auto randgen = util::make_mt19937();
 } // namespace
@@ -1954,6 +2002,9 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
   vec[0].base = config.data;
   ::memcpy((config.data + 6), &ts, sizeof(ts));
+  latencies_table.insert(std::make_pair(stream_id, std::make_unique<statistics>()));
+  latencies_table[stream_id]->tx_timestamp = ts;
+  ::memcpy((config.data + 6 + sizeof(ts)), &stream_id, sizeof(stream_id));
   vec[0].len = config.datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
 
@@ -2035,6 +2086,11 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     timestamp = std::stoull(timestamp_str);
     auto now = util::timestamp();
     auto latency = now -timestamp;
+    latencies_table[stream_id]->ack_timestamp = now;
+    if (latencies_table[stream_id]->tx_timestamp != timestamp) {
+      std::cerr << __PRETTY_FUNCTION__ << " timestamps do not match \n";
+      exit(-1);
+    }
     std::cout << __PRETTY_FUNCTION__ << " " << timestamp <<  "ns, latency=" << latency << " ns \n";
   }
   else {
@@ -2526,8 +2582,9 @@ int parse_uri(Request &req, const char *uri) {
 
 namespace {
 int parse_requests(char **argv, size_t argvlen) {
-  for (size_t i = 0; i < argvlen; ++i) {
-    auto uri = argv[i];
+  auto uri = argv[0];
+  // for (size_t i = 0; i < argvlen; ++i)
+  for (size_t i = 0; i < 2e6; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
@@ -3463,5 +3520,10 @@ int main(int argc, char **argv) {
     }
   }
 
+  std::cout << latencies_table << "\n";
+  auto [avg_lat, std_lat] =  compute_avg_latency(latencies_table);
+  std:: cout << "avg_lat = " << avg_lat << " std_lat=" << std_lat << " over " << latencies_table.size() << " reqs\n";
   return EXIT_SUCCESS;
 }
+
+
