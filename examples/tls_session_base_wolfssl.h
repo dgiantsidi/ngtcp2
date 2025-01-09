@@ -30,7 +30,7 @@
 #endif // defined(HAVE_CONFIG_H)
 
 #include <string>
-#include <string_view>
+// #include <string_view>
 
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
@@ -44,10 +44,10 @@ public:
   WOLFSSL *get_native_handle() const;
 
   std::string get_cipher_name() const;
-  std::string_view get_negotiated_group() const {
+  std::string get_negotiated_group() const {
     using namespace std::literals;
 
-    return ""sv;
+    return "";//sv;
   }
   std::string get_selected_alpn() const;
   // Keylog is enabled per SSL_CTX.

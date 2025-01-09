@@ -946,7 +946,7 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
 
 int Client::feed_data(const Endpoint &ep, const sockaddr *sa, socklen_t salen,
                       const ngtcp2_pkt_info *pi,
-                      std::span<const uint8_t> data) {
+                      Span<const uint8_t> data) {
   auto path = ngtcp2_path{
     {
       const_cast<sockaddr *>(&ep.addr.su.sa),
@@ -1020,7 +1020,7 @@ int Client::on_read(const Endpoint &ep) {
       gso_size = static_cast<size_t>(nread);
     }
 
-    auto data = std::span{buf.data(), static_cast<size_t>(nread)};
+    auto data = Span{buf.data(), static_cast<size_t>(nread)};
 
     for (;;) {
       auto datalen = std::min(data.size(), gso_size);
@@ -1128,7 +1128,7 @@ int Client::write_streams() {
   size_t gso_size = 0;
   auto ts = util::timestamp();
   auto txbuf =
-    std::span{tx_.data.data(), std::max(ngtcp2_conn_get_send_quantum(conn_),
+    Span{tx_.data.data(), std::max(ngtcp2_conn_get_send_quantum(conn_),
                                         path_max_udp_payload_size)};
   auto buf = txbuf;
 
@@ -1217,7 +1217,7 @@ int Client::write_streams() {
     }
 
     if (nwrite == 0) {
-      auto data = std::span{std::begin(txbuf), std::begin(buf)};
+      auto data = Span{std::begin(txbuf), std::begin(buf)};
       if (!data.empty()) {
         auto &ep = *static_cast<Endpoint *>(prev_ps.path.user_data);
 
@@ -1248,7 +1248,7 @@ int Client::write_streams() {
                (gso_size > path_max_udp_payload_size &&
                 static_cast<size_t>(nwrite) != gso_size)) {
       auto &ep = *static_cast<Endpoint *>(prev_ps.path.user_data);
-      auto data = std::span{std::begin(txbuf), std::begin(last_pkt)};
+      auto data = Span{std::begin(txbuf), std::begin(last_pkt)};
 
       if (auto [rest, rv] =
             send_packet(ep, prev_ps.path.remote, prev_ecn, data, gso_size);
@@ -1279,7 +1279,7 @@ int Client::write_streams() {
     if (buf.size() < path_max_udp_payload_size ||
         static_cast<size_t>(nwrite) < gso_size) {
       auto &ep = *static_cast<Endpoint *>(ps.path.user_data);
-      auto data = std::span{std::begin(txbuf), std::begin(buf)};
+      auto data = Span{std::begin(txbuf), std::begin(buf)};
 
       if (auto [rest, rv] =
             send_packet(ep, ps.path.remote, pi.ecn, data, gso_size);
@@ -1640,16 +1640,16 @@ void Client::start_delay_stream_timer() {
 }
 
 int Client::send_packet(const Endpoint &ep, const ngtcp2_addr &remote_addr,
-                        unsigned int ecn, std::span<const uint8_t> data) {
+                        unsigned int ecn, Span<const uint8_t> data) {
   // std::cout << __PRETTY_FUNCTION__ << "\n";
   auto [_, rv] = send_packet(ep, remote_addr, ecn, data, data.size());
 
   return rv;
 }
 
-std::pair<std::span<const uint8_t>, int>
+std::pair<Span<const uint8_t>, int>
 Client::send_packet(const Endpoint &ep, const ngtcp2_addr &remote_addr,
-                    unsigned int ecn, std::span<const uint8_t> data,
+                    unsigned int ecn, Span<const uint8_t> data,
                     size_t gso_size) {
   assert(gso_size);
 
@@ -1780,7 +1780,7 @@ Client::send_packet(const Endpoint &ep, const ngtcp2_addr &remote_addr,
 }
 
 void Client::on_send_blocked(const Endpoint &ep, const ngtcp2_addr &remote_addr,
-                             unsigned int ecn, std::span<const uint8_t> data,
+                             unsigned int ecn, Span<const uint8_t> data,
                              size_t gso_size) {
   assert(tx_.num_blocked || !tx_.send_blocked);
   assert(tx_.num_blocked < 2);
@@ -2065,7 +2065,7 @@ int Client::submit_http_request(const Stream *stream) {
 
 
 int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
-                             std::span<const uint8_t> data) {
+                             Span<const uint8_t> data) {
   // std::cout <<">>>>>>>>>>>>> "<<  __PRETTY_FUNCTION__ << " \n";
   auto nconsumed =
     nghttp3_conn_read_stream(httpconn_, stream_id, data.data(), data.size(),
@@ -2200,7 +2200,7 @@ void Client::http_consume(int64_t stream_id, size_t nconsumed) {
   ngtcp2_conn_extend_max_offset(conn_, nconsumed);
 }
 
-void Client::http_write_data(int64_t stream_id, std::span<const uint8_t> data) {
+void Client::http_write_data(int64_t stream_id, Span<const uint8_t> data) {
   // std::cout <<">>>>>>>>>>>>> "<<  __PRETTY_FUNCTION__ << " \n";
 
   auto it = streams_.find(stream_id);

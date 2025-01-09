@@ -21,6 +21,8 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#[[
+
 if(LIBEV_FOUND AND HAVE_OPENSSL AND LIBNGHTTP3_FOUND)
   set(qtlsclient_SOURCES
     client.cc
@@ -92,6 +94,7 @@ if(LIBEV_FOUND AND HAVE_OPENSSL AND LIBNGHTTP3_FOUND)
 
   # TODO prevent client and example servers from being installed?
 endif()
+
 
 if(LIBEV_FOUND AND HAVE_GNUTLS AND LIBNGHTTP3_FOUND)
   set(gtlsclient_SOURCES
@@ -318,8 +321,13 @@ if(LIBEV_FOUND AND HAVE_PICOTLS AND LIBNGHTTP3_FOUND)
 
   # TODO prevent ptlsclient and example ptlsservers from being installed?
 endif()
+]]
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(LIBEV_FOUND AND HAVE_WOLFSSL AND LIBNGHTTP3_FOUND)
+
+ 
   set(wsslclient_SOURCES
     client.cc
     client_base.cc
@@ -331,7 +339,7 @@ if(LIBEV_FOUND AND HAVE_WOLFSSL AND LIBNGHTTP3_FOUND)
     tls_session_base_wolfssl.cc
     util_wolfssl.cc
   )
-
+ 
   set(wsslserver_SOURCES
     server.cc
     server_base.cc
@@ -367,12 +375,15 @@ if(LIBEV_FOUND AND HAVE_WOLFSSL AND LIBNGHTTP3_FOUND)
     ${LIBNGHTTP3_LIBRARIES}
   )
 
+  
   add_executable(wsslclient ${wsslclient_SOURCES}
     $<TARGET_OBJECTS:urlparse>
   )
+  
   add_executable(wsslserver ${wsslserver_SOURCES}
     $<TARGET_OBJECTS:urlparse>
   )
+  #[[
   set_target_properties(wsslclient PROPERTIES
     COMPILE_FLAGS "${WARNCXXFLAGS} -DENABLE_EXAMPLE_WOLFSSL -DWITH_EXAMPLE_WOLFSSL"
     CXX_STANDARD 20
@@ -383,6 +394,19 @@ if(LIBEV_FOUND AND HAVE_WOLFSSL AND LIBNGHTTP3_FOUND)
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
   )
+  ]]
+  
+  
+  set_target_properties(wsslclient PROPERTIES
+    COMPILE_FLAGS "-std=c++17 ${WARNCXXFLAGS} -DENABLE_EXAMPLE_WOLFSSL -DWITH_EXAMPLE_WOLFSSL -std=c++17"
+    CXX_STANDARD_REQUIRED ON
+  )
+  
+  set_target_properties(wsslserver PROPERTIES
+    COMPILE_FLAGS "-std=c++17 ${WARNCXXFLAGS} -DENABLE_EXAMPLE_WOLFSSL -DWITH_EXAMPLE_WOLFSSL -std=c++17"
+    CXX_STANDARD_REQUIRED ON
+  )
+
   target_include_directories(wsslclient PUBLIC ${wolfssl_INCLUDE_DIRS})
   target_include_directories(wsslserver PUBLIC ${wolfssl_INCLUDE_DIRS})
   target_link_libraries(wsslclient ${wolfssl_LIBS})

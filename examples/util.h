@@ -37,7 +37,8 @@
 #include <random>
 #include <unordered_map>
 #include <string_view>
-#include <span>
+//#include <span>
+#include "custom_span.h"
 
 #include <ngtcp2/ngtcp2.h>
 #include <nghttp3/nghttp3.h>
@@ -77,7 +78,7 @@ inline nghttp3_nv make_nv_nn(const std::string_view &name,
 
 std::string format_hex(uint8_t c);
 
-std::string format_hex(std::span<const uint8_t> s);
+std::string format_hex(Span<const uint8_t> s);
 
 std::string format_hex(const std::string_view &s);
 
@@ -148,7 +149,7 @@ template <typename S, typename T> bool istarts_with(const S &a, const T &b) {
 
 // make_cid_key returns the key for |cid|.
 std::string_view make_cid_key(const ngtcp2_cid *cid);
-std::string_view make_cid_key(std::span<const uint8_t> cid);
+std::string_view make_cid_key(Span<const uint8_t> cid);
 
 // straddr stringifies |sa| of length |salen| in a format "[IP]:PORT".
 std::string straddr(const sockaddr *sa, socklen_t salen);
@@ -271,11 +272,11 @@ std::optional<uint64_t> parse_duration(const std::string_view &s);
 
 // generate_secure_random generates a cryptographically secure pseudo
 // random data of |data|.
-int generate_secure_random(std::span<uint8_t> data);
+int generate_secure_random(Span<uint8_t> data);
 
 // generate_secret generates secret and writes it to |secret|.
 // Currently, |secret| must be 32 bytes long.
-int generate_secret(std::span<uint8_t> secret);
+int generate_secret(Span<uint8_t> secret);
 
 // normalize_path removes ".." by consuming a previous path component.
 // It also removes ".".  It assumes that |path| starts with "/".  If
@@ -333,12 +334,12 @@ int create_nonblock_socket(int domain, int type, int protocol);
 
 std::optional<std::string> read_token(const std::string_view &filename);
 int write_token(const std::string_view &filename,
-                std::span<const uint8_t> token);
+                Span<const uint8_t> token);
 
 std::optional<std::string>
 read_transport_params(const std::string_view &filename);
 int write_transport_params(const std::string_view &filename,
-                           std::span<const uint8_t> data);
+                           Span<const uint8_t> data);
 
 const char *crypto_default_ciphers();
 

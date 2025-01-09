@@ -34,7 +34,8 @@
 #include <map>
 #include <string_view>
 #include <memory>
-#include <span>
+// #include <span>
+#include "custom_span.h"
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
@@ -85,7 +86,7 @@ public:
   int on_write();
   int write_streams();
   int feed_data(const Endpoint &ep, const sockaddr *sa, socklen_t salen,
-                const ngtcp2_pkt_info *pi, std::span<const uint8_t> data);
+                const ngtcp2_pkt_info *pi, Span<const uint8_t> data);
   int handle_expiry();
   void update_timer();
   int handshake_completed();
@@ -93,10 +94,10 @@ public:
   void recv_version_negotiation(const uint32_t *sv, size_t nsv);
 
   int send_packet(const Endpoint &ep, const ngtcp2_addr &remote_addr,
-                  unsigned int ecn, std::span<const uint8_t> data);
-  std::pair<std::span<const uint8_t>, int>
+                  unsigned int ecn, Span<const uint8_t> data);
+  std::pair<Span<const uint8_t>, int>
   send_packet(const Endpoint &ep, const ngtcp2_addr &remote_addr,
-              unsigned int ecn, std::span<const uint8_t> data, size_t gso_size);
+              unsigned int ecn, Span<const uint8_t> data, size_t gso_size);
   int on_stream_close(int64_t stream_id, uint64_t app_error_code);
   int on_extend_max_streams();
   int handle_error();
@@ -122,10 +123,10 @@ public:
   int setup_httpconn();
   int submit_http_request(const Stream *stream);
   int recv_stream_data(uint32_t flags, int64_t stream_id,
-                       std::span<const uint8_t> data);
+                       Span<const uint8_t> data);
   int acked_stream_data_offset(int64_t stream_id, uint64_t datalen);
   void http_consume(int64_t stream_id, size_t nconsumed);
-  void http_write_data(int64_t stream_id, std::span<const uint8_t> data);
+  void http_write_data(int64_t stream_id, Span<const uint8_t> data);
   int on_stream_reset(int64_t stream_id);
   int on_stream_stop_sending(int64_t stream_id);
   int extend_max_stream_data(int64_t stream_id, uint64_t max_data);
@@ -134,7 +135,7 @@ public:
   int http_stream_close(int64_t stream_id, uint64_t app_error_code);
 
   void on_send_blocked(const Endpoint &ep, const ngtcp2_addr &remote_addr,
-                       unsigned int ecn, std::span<const uint8_t> data,
+                       unsigned int ecn, Span<const uint8_t> data,
                        size_t gso_size);
   void start_wev_endpoint(const Endpoint &ep);
   int send_blocked_packet();
@@ -187,7 +188,7 @@ private:
       const Endpoint *endpoint;
       Address remote_addr;
       unsigned int ecn;
-      std::span<const uint8_t> data;
+      Span<const uint8_t> data;
       size_t gso_size;
     } blocked[2];
     std::array<uint8_t, 64_k> data;

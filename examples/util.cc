@@ -59,7 +59,7 @@ std::optional<std::string> read_pem(const std::string_view &filename,
                                     const std::string_view &type);
 
 int write_pem(const std::string_view &filename, const std::string_view &name,
-              const std::string_view &type, std::span<const uint8_t> data);
+              const std::string_view &type, Span<const uint8_t> data);
 
 namespace {
 constexpr char LOWER_XDIGITS[] = "0123456789abcdef";
@@ -75,7 +75,7 @@ std::string format_hex(uint8_t c) {
   return s;
 }
 
-std::string format_hex(std::span<const uint8_t> s) {
+std::string format_hex(Span<const uint8_t> s) {
   std::string res;
   res.resize(s.size() * 2);
 
@@ -202,7 +202,7 @@ uint8_t *hexdump_addr(uint8_t *dest, size_t addr) {
 } // namespace
 
 namespace {
-uint8_t *hexdump_ascii(uint8_t *dest, std::span<const uint8_t> data) {
+uint8_t *hexdump_ascii(uint8_t *dest, Span<const uint8_t> data) {
   *dest++ = '|';
 
   for (auto c : data) {
@@ -220,7 +220,7 @@ uint8_t *hexdump_ascii(uint8_t *dest, std::span<const uint8_t> data) {
 } // namespace
 
 namespace {
-uint8_t *hexdump8(uint8_t *dest, std::span<const uint8_t> data) {
+uint8_t *hexdump8(uint8_t *dest, Span<const uint8_t> data) {
   for (auto c : data) {
     *dest++ = LOWER_XDIGITS[c >> 4];
     *dest++ = LOWER_XDIGITS[c & 0xf];
@@ -238,7 +238,7 @@ uint8_t *hexdump8(uint8_t *dest, std::span<const uint8_t> data) {
 } // namespace
 
 namespace {
-uint8_t *hexdump16(uint8_t *dest, std::span<const uint8_t> data) {
+uint8_t *hexdump16(uint8_t *dest, Span<const uint8_t> data) {
   if (data.size() > 8) {
     dest = hexdump8(dest, {data.data(), 8});
     *dest++ = ' ';
@@ -256,7 +256,7 @@ uint8_t *hexdump16(uint8_t *dest, std::span<const uint8_t> data) {
 } // namespace
 
 namespace {
-uint8_t *hexdump_line(uint8_t *dest, std::span<const uint8_t> data,
+uint8_t *hexdump_line(uint8_t *dest, Span<const uint8_t> data,
                       size_t addr) {
   dest = hexdump_addr(dest, addr);
   *dest++ = ' ';
@@ -269,7 +269,7 @@ uint8_t *hexdump_line(uint8_t *dest, std::span<const uint8_t> data,
 } // namespace
 
 namespace {
-int hexdump_write(int fd, std::span<const uint8_t> data) {
+int hexdump_write(int fd, Span<const uint8_t> data) {
   ssize_t nwrite;
 
   for (;
@@ -353,7 +353,7 @@ std::string_view make_cid_key(const ngtcp2_cid *cid) {
   return make_cid_key({cid->data, cid->datalen});
 }
 
-std::string_view make_cid_key(std::span<const uint8_t> cid) {
+std::string_view make_cid_key(Span<const uint8_t> cid) {
   return std::string_view{reinterpret_cast<const char *>(cid.data()),
                           cid.size()};
 }
@@ -771,7 +771,7 @@ std::optional<std::string> read_token(const std::string_view &filename) {
 }
 
 int write_token(const std::string_view &filename,
-                std::span<const uint8_t> token) {
+                Span<const uint8_t> token) {
   return write_pem(filename, "token", "QUIC TOKEN", token);
 }
 
@@ -782,7 +782,7 @@ read_transport_params(const std::string_view &filename) {
 }
 
 int write_transport_params(const std::string_view &filename,
-                           std::span<const uint8_t> data) {
+                           Span<const uint8_t> data) {
   return write_pem(filename, "transport parameters",
                    "QUIC TRANSPORT PARAMETERS", data);
 }

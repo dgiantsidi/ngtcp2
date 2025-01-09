@@ -36,7 +36,8 @@
 
 #include <cinttypes>
 #include <string_view>
-#include <span>
+// #include <span>
+#include "custom_span.h"
 
 #include <ngtcp2/ngtcp2.h>
 #include <nghttp3/nghttp3.h>
@@ -52,43 +53,43 @@ int handshake_confirmed(ngtcp2_conn *conn, void *user_data);
 bool packet_lost(double prob);
 
 void print_crypto_data(ngtcp2_encryption_level encryption_level,
-                       std::span<const uint8_t> data);
+                       Span<const uint8_t> data);
 
-void print_stream_data(int64_t stream_id, std::span<const uint8_t> data);
+void print_stream_data(int64_t stream_id, Span<const uint8_t> data);
 
-void print_initial_secret(std::span<const uint8_t> data);
+void print_initial_secret(Span<const uint8_t> data);
 
-void print_client_in_secret(std::span<const uint8_t> data);
-void print_server_in_secret(std::span<const uint8_t> data);
+void print_client_in_secret(Span<const uint8_t> data);
+void print_server_in_secret(Span<const uint8_t> data);
 
-void print_handshake_secret(std::span<const uint8_t> data);
+void print_handshake_secret(Span<const uint8_t> data);
 
-void print_client_hs_secret(std::span<const uint8_t> data);
-void print_server_hs_secret(std::span<const uint8_t> data);
+void print_client_hs_secret(Span<const uint8_t> data);
+void print_server_hs_secret(Span<const uint8_t> data);
 
-void print_client_0rtt_secret(std::span<const uint8_t> data);
+void print_client_0rtt_secret(Span<const uint8_t> data);
 
-void print_client_1rtt_secret(std::span<const uint8_t> data);
-void print_server_1rtt_secret(std::span<const uint8_t> data);
+void print_client_1rtt_secret(Span<const uint8_t> data);
+void print_server_1rtt_secret(Span<const uint8_t> data);
 
-void print_client_pp_key(std::span<const uint8_t> data);
-void print_server_pp_key(std::span<const uint8_t> data);
+void print_client_pp_key(Span<const uint8_t> data);
+void print_server_pp_key(Span<const uint8_t> data);
 
-void print_client_pp_iv(std::span<const uint8_t> data);
-void print_server_pp_iv(std::span<const uint8_t> data);
+void print_client_pp_iv(Span<const uint8_t> data);
+void print_server_pp_iv(Span<const uint8_t> data);
 
-void print_client_pp_hp(std::span<const uint8_t> data);
-void print_server_pp_hp(std::span<const uint8_t> data);
+void print_client_pp_hp(Span<const uint8_t> data);
+void print_server_pp_hp(Span<const uint8_t> data);
 
-void print_secrets(std::span<const uint8_t> secret,
-                   std::span<const uint8_t> key, std::span<const uint8_t> iv,
-                   std::span<const uint8_t> hp);
+void print_secrets(Span<const uint8_t> secret,
+                   Span<const uint8_t> key, Span<const uint8_t> iv,
+                   Span<const uint8_t> hp);
 
-void print_secrets(std::span<const uint8_t> secret,
-                   std::span<const uint8_t> key, std::span<const uint8_t> iv);
+void print_secrets(Span<const uint8_t> secret,
+                   Span<const uint8_t> key, Span<const uint8_t> iv);
 
-void print_hp_mask(std::span<const uint8_t> mask,
-                   std::span<const uint8_t> sample);
+void print_hp_mask(Span<const uint8_t> mask,
+                   Span<const uint8_t> sample);
 
 void log_printf(void *user_data, const char *fmt, ...);
 
@@ -104,7 +105,7 @@ void print_http_header(int64_t stream_id, const nghttp3_rcbuf *name,
 
 void print_http_end_headers(int64_t stream_id);
 
-void print_http_data(int64_t stream_id, std::span<const uint8_t> data);
+void print_http_data(int64_t stream_id, Span<const uint8_t> data);
 
 void print_http_begin_trailers(int64_t stream_id);
 
