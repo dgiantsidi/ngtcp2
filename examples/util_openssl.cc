@@ -37,12 +37,13 @@
 #include <openssl/rand.h>
 
 #include "template.h"
+#include "custom_span.h"
 
 namespace ngtcp2 {
 
 namespace util {
 
-int generate_secure_random(std::span<uint8_t> data) {
+int generate_secure_random(Span<uint8_t> data) {
   if (RAND_bytes(data.data(), static_cast<int>(data.size())) != 1) {
     return -1;
   }
@@ -50,7 +51,7 @@ int generate_secure_random(std::span<uint8_t> data) {
   return 0;
 }
 
-int generate_secret(std::span<uint8_t> secret) {
+int generate_secret(Span<uint8_t> secret) {
   std::array<uint8_t, 16> rand;
 
   if (generate_secure_random(rand) != 0) {
@@ -112,7 +113,7 @@ std::optional<std::string> read_pem(const std::string_view &filename,
 }
 
 int write_pem(const std::string_view &filename, const std::string_view &name,
-              const std::string_view &type, std::span<const uint8_t> data) {
+              const std::string_view &type, Span<const uint8_t> data) {
   auto f = BIO_new_file(filename.data(), "w");
   if (f == nullptr) {
     std::cerr << "Could not write " << name << " in " << filename << std::endl;
