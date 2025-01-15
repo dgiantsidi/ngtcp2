@@ -523,19 +523,25 @@ int extend_max_local_streams_bidi(ngtcp2_conn *conn, uint64_t max_streams,
                                   void *user_data) {
   auto c = static_cast<Client *>(user_data);
   // std::cout << __PRETTY_FUNCTION__ << " STEP1: >>>>>>>>>>>>>>>>>>> max_streams=" << max_streams <<"\n";
+  // std::cout << __PRETTY_FUNCTION__ << " #1\n";
   if (c->on_extend_max_streams() != 0) {
+    std::cerr <<  __PRETTY_FUNCTION__ << "#1:NGTCP2_ERR_CALLBACK_FAILURE\n";
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
-
+  // TODO: when usign STEP2 and STEP3 there are many requests in flight
   // std::cout << __PRETTY_FUNCTION__ << " STEP2: >>>>>>>>>>>>>>>>>>> max_streams=" << max_streams <<"\n";
-  if (c->on_extend_max_streams() != 0) {
-    return NGTCP2_ERR_CALLBACK_FAILURE;
-  }
+  //std::cout << __PRETTY_FUNCTION__ << " #2\n";
+  // if (c->on_extend_max_streams() != 0) {
+  //   std::cerr <<  __PRETTY_FUNCTION__ << "#1:NGTCP2_ERR_CALLBACK_FAILURE\n";
+   //  return NGTCP2_ERR_CALLBACK_FAILURE;
+  // }
 
   // std::cout << __PRETTY_FUNCTION__ << " STEP3: >>>>>>>>>>>>>>>>>>> max_streams=" << max_streams <<"\n";
-  if (c->on_extend_max_streams() != 0) {
-    return NGTCP2_ERR_CALLBACK_FAILURE;
-  }
+ //  std::cout << __PRETTY_FUNCTION__ << " #3\n";
+  //if (c->on_extend_max_streams() != 0) {
+  //  std::cerr <<  __PRETTY_FUNCTION__ << "#1:NGTCP2_ERR_CALLBACK_FAILURE\n";
+   //  return NGTCP2_ERR_CALLBACK_FAILURE;
+  // }
   return 0;
 }
 } // namespace
@@ -1956,7 +1962,7 @@ static std::tuple<bool, int> wait_until_received_ack(int cur_req_no) {
    if ((it->second->acked != true) && (cur_req_no == cur_acked_req_id)) {
     std::cerr << __PRETTY_FUNCTION__ << " error\n" << "\n";
    }
-    
+   //std::cout << "cur_req_no=" << cur_req_no << " and cur_acked_req_id="<< cur_acked_req_id <<" \n"; 
    return std::make_tuple((cur_req_no == cur_acked_req_id), cur_acked_req_id);
 }
 
@@ -1971,7 +1977,7 @@ int Client::on_extend_max_streams() {
   static int req_no = 0;
   auto [proceed, cur_acked_req] = wait_until_received_ack(req_no);
   if (!proceed) {
-    //std::cout << __PRETTY_FUNCTION__ << " req_no=" << req_no << " and cur_acked_req=" << cur_acked_req <<"\n";
+    // std::cout << __PRETTY_FUNCTION__ << " req_no=" << req_no << " and cur_acked_req=" << cur_acked_req <<"\n";
     return 0;
   }
   // for (; nstreams_done_ < config.nstreams; ++nstreams_done_) 
@@ -2012,6 +2018,8 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   // std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
   vec[0].base = config.data;
   ::memcpy((config.data + 6), &ts, sizeof(ts));
+  // std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << " ts=" << ts; 
+
   latencies_table.insert(std::make_pair(stream_id, std::make_unique<statistics>()));
   latencies_table[stream_id]->tx_timestamp = ts;
   ::memcpy((config.data + 6 + sizeof(ts)), &stream_id, sizeof(stream_id));
@@ -2048,7 +2056,10 @@ int Client::submit_http_request(const Stream *stream) {
 
   nghttp3_data_reader dr{};
   dr.read_data = read_data;
-
+  // auto ts = util::timestamp();
+  // latencies_table.insert(std::make_pair(stream->stream_id, std::make_unique<statistics>()));
+  // latencies_table[stream->stream_id]->tx_timestamp = ts;
+  // std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream->stream_id << " ts=" << ts; 
   if (auto rv = nghttp3_conn_submit_request(
         httpconn_, stream->stream_id, nva.data(), nvlen,
         config.fd == -1 ? nullptr : &dr, nullptr);
