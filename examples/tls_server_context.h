@@ -41,6 +41,7 @@
 #  include "tls_server_context_boringssl.h"
 #endif // defined(ENABLE_EXAMPLE_BORINGSSL) && defined(WITH_EXAMPLE_BORINGSSL)
 
+#  include "tls_server_context_picotls.h"
 #if defined(ENABLE_EXAMPLE_PICOTLS) && defined(WITH_EXAMPLE_PICOTLS)
 #  include "tls_server_context_picotls.h"
 #endif // defined(ENABLE_EXAMPLE_PICOTLS) && defined(WITH_EXAMPLE_PICOTLS)

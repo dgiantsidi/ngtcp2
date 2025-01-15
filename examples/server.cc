@@ -31,7 +31,6 @@
 #include <memory>
 #include <fstream>
 #include <iomanip>
-
 #include <unistd.h>
 #include <getopt.h>
 #include <sys/types.h>
@@ -53,9 +52,11 @@
 #include "shared.h"
 #include "http.h"
 #include "template.h"
-
+#include "config.h"
 using namespace ngtcp2;
 using namespace std::literals;
+
+#define DEBUG_INFO() printf("File: %s, Function: %s, Line: %d\n", __FILE__, __FUNCTION__, __LINE__)
 
 namespace {
 constexpr size_t NGTCP2_SV_SCIDLEN = 18;
@@ -73,7 +74,7 @@ namespace {
 auto randgen = util::make_mt19937();
 } // namespace
 
-Config config{};
+//Config config{};
 
 Stream::Stream(int64_t stream_id, Handler *handler)
   : stream_id(stream_id),
@@ -97,23 +98,7 @@ std::string make_status_body(unsigned int status_code, uint64_t timestamp) {
   auto reason_phrase = http::get_reason_phrase(status_code);
 
   std::string body;
-  body =status_string + " " + reason_phrase + std::to_string(timestamp);
-  #if 0
-  body = "<html><head><title>";
-  body += status_string;
-  body += ' ';
-  body += reason_phrase;
-  body += "</title></head><body><h1>";
-  body += status_string;
-  body += ' ';
-  body += reason_phrase;
-  body += "</h1><hr><address>";
-  body += NGTCP2_SERVER;
-  body += " at port ";
-  body += util::format_uint(config.port);
-  body += "</address>";
-  body += "</body></html>";
-  #endif
+  body =status_string + " " + reason_phrase + std::to_string(timestamp);  
   //std::cout << __PRETTY_FUNCTION__ << " ---> body=" << body << "\n";
   return body;
 }
@@ -428,12 +413,29 @@ int Stream::send_redirect_response(nghttp3_conn *httpconn,
   return send_status_response(httpconn, status_code, 0, {{"location", path}});
 }
 
+
+struct httpconn_data {
+  explicit httpconn_data(nghttp3_conn *conn, uint64_t timestamp_ns) : httpconn(conn), send_timestamp_ns(timestamp_ns) {};
+  nghttp3_conn *httpconn;
+  uint64_t send_timestamp_ns;
+};
+
+std::unordered_map<uint64_t, std::unique_ptr<httpconn_data>> responses_reply;
+
 int Stream::start_response(nghttp3_conn *httpconn, uint64_t timestamp) {
   // std::cout << __PRETTY_FUNCTION__ << "  \n";
   // TODO This should be handled by nghttp3
   if (method == "PUT") {
+    // execute raft w/ cmd
+    // enqueue httpconn, 200, timestamp
+    responses_reply.emplace(this->stream_id, std::make_unique<httpconn_data>(httpconn, timestamp));
+    // return 0;
     return send_status_response(httpconn, 200, timestamp);
   }
+
+  
+  DEBUG_INFO();
+  assert(false);
   std::cout << "=============================== Should not reach at this point ===============================\n";
   if (uri.empty() || method.empty()) {
     return send_status_response(httpconn, 400);
@@ -1132,6 +1134,7 @@ int Handler::http_end_request_headers(Stream *stream) {
  // std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen <<  " stream->data_vec.size()=" << stream->data_vec.size() <<
   //"\n";
   if (config.early_response) {
+    std::cout << __PRETTY_FUNCTION__ << " config.early_response=" << config.early_response << "\n";
     if (start_response(stream) != 0) {
       return -1;
     }
@@ -1171,6 +1174,7 @@ int Handler::http_end_stream(Stream *stream) {
   //std::cout << "\n\n";
   // std::cout << __PRETTY_FUNCTION__ << "\n";
   if (!config.early_response) {
+    // std::cout << __PRETTY_FUNCTION__ << " config.early_response=" << config.early_response << "\n";
     return start_response(stream, timestamp);
   }
   return 0;
@@ -1178,6 +1182,9 @@ int Handler::http_end_stream(Stream *stream) {
 
 int Handler::start_response(Stream *stream, uint64_t timestamp) {
   // std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << " server_id=" <<server()->get_id() <<"\n";
+  server()->replicate_cmd();
+  while (!server()->cmd_replicated()) {};
   return stream->start_response(httpconn_, timestamp);
 }
 
@@ -3363,16 +3370,14 @@ namespace {
 const char *prog = "server";
 } // namespace
 
-namespace {
 void print_usage() {
   std::cerr << "Usage: " << prog
             << " [OPTIONS] <ADDR> <PORT> <PRIVATE_KEY_FILE> "
                "<CERTIFICATE_FILE>"
             << std::endl;
 }
-} // namespace
 
-namespace {
+
 void config_set_default(Config &config) {
   config = Config{};
   config.tx_loss_prob = 0.;
@@ -3392,6 +3397,7 @@ void config_set_default(Config &config) {
   config.max_stream_data_uni = 256_k;
   config.max_window = 6_m;
   config.max_stream_window = 6_m;
+  config.quiet = true;
   config.max_streams_bidi = 100;
   config.max_streams_uni = 3;
   config.max_dyn_length = 20_m;
@@ -3401,7 +3407,7 @@ void config_set_default(Config &config) {
   config.ack_thresh = 2;
   config.initial_pkt_num = UINT32_MAX;
 }
-} // namespace
+// namespace
 
 namespace {
 void print_help() {
@@ -3585,7 +3591,7 @@ Options:
 } // namespace
 
 std::ofstream keylog_file;
-
+#if 0
 int main(int argc, char **argv) {
   config_set_default(config);
 
@@ -4059,3 +4065,4 @@ int main(int argc, char **argv) {
 
   return EXIT_SUCCESS;
 }
+#endif

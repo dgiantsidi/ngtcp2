@@ -30,7 +30,7 @@
 #endif // defined(HAVE_CONFIG_H)
 
 #include "tls_session_base_picotls.h"
-
+#warning "building w/ picotls"
 class TLSServerContext;
 class HandlerBase;
 

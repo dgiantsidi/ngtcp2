@@ -37,6 +37,7 @@
 #include <openssl/rand.h>
 
 #include "template.h"
+#include "custom_span.h"
 
 namespace ngtcp2 {
 
@@ -50,7 +51,7 @@ int generate_secure_random(std::span<uint8_t> data) {
   return 0;
 }
 
-int generate_secret(std::span<uint8_t> secret) {
+int generate_secret(Span<uint8_t> secret) {
   std::array<uint8_t, 16> rand;
 
   if (generate_secure_random(rand) != 0) {

@@ -35,13 +35,14 @@
 #include <deque>
 #include <string_view>
 #include <memory>
+#include <functional>
+
 // #include <span>
 #include "custom_span.h"
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
 #include <nghttp3/nghttp3.h>
-
 #include <ev.h>
 
 #include "server_base.h"
@@ -61,6 +62,22 @@ struct HTTPHeader {
 
 class Handler;
 struct FileEntry;
+
+
+struct callable_replication {
+  explicit callable_replication(std::shared_ptr<void> dr, const std::function<void(std::weak_ptr<void>, uint8_t*, size_t)> f) {
+    func = f;
+    driver = dr;
+  }
+  void invoke(uint8_t* data = nullptr, size_t sz = 0) {
+    if (data)
+      func(driver, data, sz);
+    else 
+      func(driver, nullptr, 0);
+  }
+  std::function<void(std::weak_ptr<void>,uint8_t*, size_t)> func;
+  std::weak_ptr<void> driver;
+};
 
 struct Stream {
   Stream(int64_t stream_id, Handler *handler);
@@ -172,9 +189,11 @@ public:
                        const ngtcp2_addr &remote_addr, unsigned int ecn,
                        Span<const uint8_t> data, size_t gso_size);
   void start_wev_endpoint(const Endpoint &ep);
+  
   int send_blocked_packet();
   std::unordered_map<int64_t, std::unique_ptr<Stream>> streams_;
 
+  
 private:
   struct ev_loop *loop_;
   Server *server_;
@@ -263,6 +282,28 @@ public:
   void dissociate_cid(const ngtcp2_cid *cid);
 
   void on_stateless_reset_regen();
+  void assign_server_id(const int& id) {
+    server_id = id;
+  };
+
+  int get_id() {
+    return server_id;
+  }
+
+  int replicate_cmd() {
+    // std::cout << __PRETTY_FUNCTION__ << " server_id=" << server_id <<"\n";
+    replication->invoke();
+    return 0;
+  }
+
+  bool cmd_replicated() {
+    // std::cout << __PRETTY_FUNCTION__ << " server_id=" << server_id <<"\n";
+    return true;
+  }
+
+  void register_replication(std::shared_ptr<callable_replication> callback) {
+    replication = callback;
+  }
 
 private:
   std::unordered_map<std::string, Handler *, string_hash, std::equal_to<>>
@@ -273,6 +314,16 @@ private:
   ev_signal sigintev_;
   ev_timer stateless_reset_regen_timer_;
   size_t stateless_reset_bucket_;
+  int server_id = -1;
+  std::shared_ptr<callable_replication> replication;
+
 };
 
 #endif // !defined(SERVER_H)
+
+
+
+void config_set_default(Config &config);
+
+
+void print_usage();

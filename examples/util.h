@@ -37,7 +37,7 @@
 #include <random>
 #include <unordered_map>
 #include <string_view>
-//#include <span>
+#include <span>
 #include "custom_span.h"
 
 #include <ngtcp2/ngtcp2.h>
@@ -272,7 +272,7 @@ std::optional<uint64_t> parse_duration(const std::string_view &s);
 
 // generate_secure_random generates a cryptographically secure pseudo
 // random data of |data|.
-int generate_secure_random(Span<uint8_t> data);
+int generate_secure_random(std::span<uint8_t> data);
 
 // generate_secret generates secret and writes it to |secret|.
 // Currently, |secret| must be 32 bytes long.

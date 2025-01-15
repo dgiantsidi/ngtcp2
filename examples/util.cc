@@ -24,7 +24,7 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "util.h"
-
+#include <arpa/inet.h>
 #ifdef HAVE_ARPA_INET_H
 #  include <arpa/inet.h>
 #endif // defined(HAVE_ARPA_INET_H)
