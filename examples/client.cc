@@ -2607,7 +2607,7 @@ namespace {
 int parse_requests(char **argv, size_t argvlen) {
   auto uri = argv[0];
   // for (size_t i = 0; i < argvlen; ++i)
-  for (size_t i = 0; i < 400000; ++i) {
+  for (size_t i = 0; i < 200000; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
