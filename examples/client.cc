@@ -61,7 +61,7 @@ struct statistics {
   uint64_t tx_timestamp = 0;
   uint64_t ack_timestamp = 0;
   friend std::ostream& operator << (std::ostream& os, const statistics& stats) {
-    os << "(" << std:: dec << stats.tx_timestamp << ", " << std:: dec << stats.ack_timestamp << ", computed latency= " << (stats.ack_timestamp-stats.tx_timestamp) << "ns )";
+    os << "(" << std:: dec << stats.tx_timestamp << ", " << std:: dec << stats.ack_timestamp << ", computed latency= " << (stats.ack_timestamp-stats.tx_timestamp) << "ns, " << (stats.ack_timestamp-stats.tx_timestamp)/1000000.0 << " ms)";
     return os;
   }
 };
@@ -88,7 +88,7 @@ static std::tuple<double, double> compute_avg_latency(const std::map<int, std::u
     // Compute the standard deviation
     double standard_deviation = std::sqrt(variance);
 
-    std::cout << "Average Latency: " << mean_latency << " ns" << std::endl;
+    std::cout << "Average Latency: " << mean_latency << " ns" <<  "(" << mean_latency/1000000.0 << " ms)" << std::endl;
     std::cout << "Variance: " << variance << " ns^2" << std::endl;
     std::cout << "Standard Deviation: " << standard_deviation << " ns" << std::endl;
     return {mean_latency, standard_deviation};
@@ -2607,7 +2607,7 @@ namespace {
 int parse_requests(char **argv, size_t argvlen) {
   auto uri = argv[0];
   // for (size_t i = 0; i < argvlen; ++i)
-  for (size_t i = 0; i < 1e6; ++i) {
+  for (size_t i = 0; i < 400000; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
