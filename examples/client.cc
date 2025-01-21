@@ -2027,9 +2027,9 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 
   std::unique_ptr<quic_message> msg_ptr = quic_message::construct_message(ts, global_req_id.load());
   global_req_id.fetch_add(1);
-  msg_ptr->payload_sz = 6;
+  msg_ptr->payload_sz = 816;
   msg_ptr->payload = std::make_unique<uint8_t[]>(config.datalen);
-  ::memcpy(msg_ptr->payload.get(), config.data, 6);
+  ::memcpy(msg_ptr->payload.get(), config.data, msg_ptr->payload_sz);
 
   // todo: this is an extra memcpy, maybe use the msg_ptr->paylaod to construct the message
   // and copy this to config.data
@@ -3489,8 +3489,8 @@ int main(int argc, char **argv) {
                   << strerror(errno) << std::endl;
         exit(EXIT_FAILURE);
       }
-      config.data = new uint8_t[24]; // static_cast<uint8_t *>(addr);
-      config.datalen = 24;
+      config.data = new uint8_t[1024]; // static_cast<uint8_t *>(addr);
+      config.datalen = 1024;
       config.data[0] = 'P';config.data[1] = 'U';config.data[2] = 'T';config.data[3] = ' ';config.data[4] = 'X';config.data[5] = ' ';
     }
    //  std::cout << "config.fd="<< config.fd << " config.datalen=" << config.datalen << "\n";
