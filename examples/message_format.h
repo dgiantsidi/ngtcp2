@@ -38,6 +38,7 @@ struct quic_message {
         offset += sizeof(k_payload_sz);
         ptr->payload = std::make_unique<uint8_t[]>(ptr->payload_sz);
         ::memcpy(ptr->payload.get(), data+offset, ptr->payload_sz);
+        
         return std::move(ptr);
     }
 

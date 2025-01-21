@@ -292,6 +292,12 @@ public:
   }
 
   int replicate_cmd(uint64_t req_id, uint8_t* data = nullptr, size_t sz = 0) {
+    /*
+    for (auto i = 0ULL; i < 5; i++) {
+            std::cout << (char)data[i];
+        }
+  std::cout << "\n";
+  */
     replication->invoke(req_id, data, sz);
     return 0;
   }

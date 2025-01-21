@@ -1206,6 +1206,13 @@ int Handler::http_end_stream(Stream *stream) {
   //std::cout << "\n\n";
   // std::cout << __PRETTY_FUNCTION__ << "\n";
   if (!config.early_response) {
+  
+  /*
+    for (auto i = 0ULL; i < 5; i++) {
+            std::cout << (char)msg_ptr->payload[i];
+        }
+        std::cout << "\n";
+        */
     // std::cout << __PRETTY_FUNCTION__ << " config.early_response=" << config.early_response << "\n";
     return start_response(stream, std::move(msg_ptr));
   }
@@ -1215,6 +1222,12 @@ int Handler::http_end_stream(Stream *stream) {
 int Handler::start_response(Stream *stream, std::unique_ptr<quic_message> msg) {
   // std::cout << __PRETTY_FUNCTION__ << "\n";
   // std::cout << __PRETTY_FUNCTION__ << " server_id=" <<server()->get_id() <<"\n";
+  /*
+  for (auto i = 0ULL; i < 5; i++) {
+            std::cout << (char)msg->payload[i];
+        }
+  std::cout << "\n";
+  */
   server()->replicate_cmd(msg->req_id, msg->payload.get(), msg->payload_sz);
   while (!server()->cmd_replicated(msg->req_id)) {};
   return stream->start_response(httpconn_, std::move(msg));
