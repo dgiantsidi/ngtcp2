@@ -49,6 +49,7 @@
 #include "tls_server_context.h"
 #include "network.h"
 #include "shared.h"
+#include "message_format.h"
 
 using namespace ngtcp2;
 
@@ -82,10 +83,10 @@ struct callable_replication {
 struct Stream {
   Stream(int64_t stream_id, Handler *handler);
 
-  int start_response(nghttp3_conn *conn, uint64_t timestamp = 0);
+  int start_response(nghttp3_conn *conn, std::unique_ptr<quic_message> msg_ptr = nullptr);
   std::pair<FileEntry, int> open_file(const std::string &path);
   void map_file(const FileEntry &fe);
-  int send_status_response(nghttp3_conn *conn, unsigned int status_code, uint64_t timestamp = 0,
+  int send_status_response(nghttp3_conn *conn, unsigned int status_code, std::unique_ptr<quic_message> msg_ptr = nullptr,
                            const std::vector<HTTPHeader> &extra_headers = {});
   int send_redirect_response(nghttp3_conn *conn, unsigned int status_code,
                              const std::string_view &path);
@@ -173,7 +174,7 @@ public:
                                 nghttp3_rcbuf *name, nghttp3_rcbuf *value);
   int http_end_request_headers(Stream *stream);
   int http_end_stream(Stream *stream);
-  int start_response(Stream *stream, uint64_t timestamp =0);
+  int start_response(Stream *stream, std::unique_ptr<quic_message> msg_ptr = nullptr);
   int on_stream_reset(int64_t stream_id);
   int on_stream_stop_sending(int64_t stream_id);
   int extend_max_stream_data(int64_t stream_id, uint64_t max_data);
@@ -290,9 +291,9 @@ public:
     return server_id;
   }
 
-  int replicate_cmd() {
+  int replicate_cmd(uint8_t* data = nullptr, size_t sz = 0) {
     // std::cout << __PRETTY_FUNCTION__ << " server_id=" << server_id <<"\n";
-    replication->invoke();
+    replication->invoke(data, sz);
     return 0;
   }
 
