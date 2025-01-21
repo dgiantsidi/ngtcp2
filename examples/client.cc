@@ -2023,19 +2023,28 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   auto ts = util::timestamp();
   // std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
   
-
-
+  /*
+  for (auto i = 0ULL; i < 6; i++)
+    std::cout << (char)config.data[i];
+  std::cout << "\n";
+  */
   std::unique_ptr<quic_message> msg_ptr = quic_message::construct_message(ts, global_req_id.load());
-  global_req_id.fetch_add(1);
   msg_ptr->payload_sz = 816;
   msg_ptr->payload = std::make_unique<uint8_t[]>(config.datalen);
-  ::memcpy(msg_ptr->payload.get(), config.data, msg_ptr->payload_sz);
+  if (global_req_id.load() == 0)
+    ::memcpy(msg_ptr->payload.get(), config.data, msg_ptr->payload_sz);
+  else 
+    ::memcpy(msg_ptr->payload.get(), config.data + quic_message::payload_offset(), msg_ptr->payload_sz);
 
+  std::cout << "\n";
   // todo: this is an extra memcpy, maybe use the msg_ptr->paylaod to construct the message
   // and copy this to config.data
   auto [ptr, sz] = msg_ptr->serialize_me(config.datalen);
   ::memcpy(config.data, ptr.get(), sz);
   
+   for (auto i = 0ULL; i < 5; i++)
+    std::cout << (char)(config.data + quic_message::payload_offset())[i];
+
   //::memcpy((config.data + 6), &ts, sizeof(ts));
   // std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << " ts=" << ts; 
   vec[0].base = config.data;
@@ -2047,6 +2056,8 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   //::memcpy((config.data + 6 + sizeof(ts)), &stream_id, sizeof(stream_id));
   vec[0].len = config.datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
+    global_req_id.fetch_add(1);
+
 
   return 1;
 }
@@ -2643,7 +2654,7 @@ namespace {
 int parse_requests(char **argv, size_t argvlen) {
   auto uri = argv[0];
   // for (size_t i = 0; i < argvlen; ++i)
-  for (size_t i = 0; i < 200000; ++i) {
+  for (size_t i = 0; i < 10; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
