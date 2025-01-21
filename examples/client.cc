@@ -51,22 +51,28 @@
 #include "debug.h"
 #include "util.h"
 #include "shared.h"
+#include "message_format.h"
 
 using namespace ngtcp2;
 using namespace std::literals;
 
 struct statistics {
-  uint64_t req_id;
+  statistics() {
+    //std::cout << __PRETTY_FUNCTION__ << "\n";
+  }
+  uint64_t req_id = -1;
+  uint64_t stream_id = -1;
   bool acked = false;
   uint64_t tx_timestamp = 0;
   uint64_t ack_timestamp = 0;
   friend std::ostream& operator << (std::ostream& os, const statistics& stats) {
-    os << "(" << std:: dec << stats.tx_timestamp << ", " << std:: dec << stats.ack_timestamp << ", computed latency= " << (stats.ack_timestamp-stats.tx_timestamp) << "ns, " << (stats.ack_timestamp-stats.tx_timestamp)/1000000.0 << " ms)";
+    os << stats.req_id <<":(stream_id=" << stats.stream_id <<") " << std:: dec << stats.tx_timestamp << ", " << std:: dec << stats.ack_timestamp << ", computed latency= " << (stats.ack_timestamp-stats.tx_timestamp) << "ns, " << (stats.ack_timestamp-stats.tx_timestamp)/1000000.0 << " ms)";
     return os;
   }
 };
 
 std::map<int, std::unique_ptr<statistics>> latencies_table;
+static std::atomic<uint64_t> global_req_id{0};
 
 static std::tuple<double, double> compute_avg_latency(const std::map<int, std::unique_ptr<statistics>>& m) {
   // Compute the average latency and standard deviation
@@ -88,7 +94,7 @@ static std::tuple<double, double> compute_avg_latency(const std::map<int, std::u
     // Compute the standard deviation
     double standard_deviation = std::sqrt(variance);
 
-    std::cout << "Average Latency: " << mean_latency << " ns" <<  "(" << mean_latency/1000000.0 << " ms)" << std::endl;
+    std::cout << "Average Latency: " << mean_latency << " ns " <<  "(" << mean_latency/1000000.0 << " ms)" << std::endl;
     std::cout << "Variance: " << variance << " ns^2" << std::endl;
     std::cout << "Standard Deviation: " << standard_deviation << " ns" << std::endl;
     return {mean_latency, standard_deviation};
@@ -2016,13 +2022,29 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   // @dimitra: add timestamp
   auto ts = util::timestamp();
   // std::cout << __PRETTY_FUNCTION__ << " : " <<  ts << " ns\n";
-  vec[0].base = config.data;
-  ::memcpy((config.data + 6), &ts, sizeof(ts));
-  // std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << " ts=" << ts; 
+  
 
+
+  std::unique_ptr<quic_message> msg_ptr = quic_message::construct_message(ts, global_req_id.load());
+  global_req_id.fetch_add(1);
+  msg_ptr->payload_sz = 6;
+  msg_ptr->payload = std::make_unique<uint8_t[]>(config.datalen);
+  ::memcpy(msg_ptr->payload.get(), config.data, 6);
+
+  // todo: this is an extra memcpy, maybe use the msg_ptr->paylaod to construct the message
+  // and copy this to config.data
+  auto [ptr, sz] = msg_ptr->serialize_me(config.datalen);
+  ::memcpy(config.data, ptr.get(), sz);
+  
+  //::memcpy((config.data + 6), &ts, sizeof(ts));
+  // std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << " ts=" << ts; 
+  vec[0].base = config.data;
   latencies_table.insert(std::make_pair(stream_id, std::make_unique<statistics>()));
   latencies_table[stream_id]->tx_timestamp = ts;
-  ::memcpy((config.data + 6 + sizeof(ts)), &stream_id, sizeof(stream_id));
+  latencies_table[stream_id]->req_id = msg_ptr->req_id;
+  latencies_table[stream_id]->stream_id = stream_id;
+  //std::cout << __PRETTY_FUNCTION__ << " ts=" << ts << " req_id=" <<  msg_ptr->req_id << "\n";
+  //::memcpy((config.data + 6 + sizeof(ts)), &stream_id, sizeof(stream_id));
   vec[0].len = config.datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
 
@@ -2102,16 +2124,30 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     acks.fetch_add(1);
     if (acks.load()%100000 == 0) 
       std::cout << "acks no=" << acks.load() << "\n";
+    // std::cout << __PRETTY_FUNCTION__ << " " << server_reply << "\n";
     uint64_t timestamp = 0;
-    std::string timestamp_str(server_reply.data()+6, server_reply.size()-6);
+    ::memcpy(&timestamp, server_reply.data()+6, sizeof(timestamp));
+    // std::string timestamp_str(server_reply.data()+6, sizeof(timestamp));
     // std::cout << timestamp_str << "\n";
-    timestamp = std::stoull(timestamp_str);
+    //timestamp = std::stoull(timestamp_str);
+
+    uint64_t req_id = 0;
+    // std::string req_id_str(server_reply.data()+6+sizeof(timestamp), sizeof(req_id));
+    ::memcpy(&req_id, server_reply.data()+6+ sizeof(timestamp), sizeof(req_id));
     auto now = util::timestamp();
-    auto latency = now -timestamp;
+    auto latency = now - timestamp;
     latencies_table[stream_id]->ack_timestamp = now;
     latencies_table[stream_id]->acked = true;
+    if (acks.load() != (req_id+1)) {
+      std::cerr << __PRETTY_FUNCTION__ << " problem\n";
+      exit (-1);
+    }
+    if (latencies_table[stream_id]->req_id != req_id) {
+      std::cerr << __PRETTY_FUNCTION__ << " request ids do not match " << latencies_table[stream_id]->req_id << " " << req_id << "\n";
+      exit(-1);
+    }
     if (latencies_table[stream_id]->tx_timestamp != timestamp) {
-      std::cerr << __PRETTY_FUNCTION__ << " timestamps do not match \n";
+      std::cerr << __PRETTY_FUNCTION__ << " timestamps do not match: "<< latencies_table[stream_id]->tx_timestamp << " " << timestamp << "\n";
       exit(-1);
     }
     // std::cout << __PRETTY_FUNCTION__ << " " << timestamp <<  "ns, latency=" << latency << " ns \n";
@@ -2607,7 +2643,7 @@ namespace {
 int parse_requests(char **argv, size_t argvlen) {
   auto uri = argv[0];
   // for (size_t i = 0; i < argvlen; ++i)
-  for (size_t i = 0; i < 1e6; ++i) {
+  for (size_t i = 0; i < 200000; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
