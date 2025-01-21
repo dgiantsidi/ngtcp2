@@ -1215,8 +1215,8 @@ int Handler::http_end_stream(Stream *stream) {
 int Handler::start_response(Stream *stream, std::unique_ptr<quic_message> msg) {
   // std::cout << __PRETTY_FUNCTION__ << "\n";
   // std::cout << __PRETTY_FUNCTION__ << " server_id=" <<server()->get_id() <<"\n";
-  server()->replicate_cmd(msg->payload.get(), msg->payload_sz);
-  while (!server()->cmd_replicated()) {};
+  server()->replicate_cmd(msg->req_id, msg->payload.get(), msg->payload_sz);
+  while (!server()->cmd_replicated(msg->req_id)) {};
   return stream->start_response(httpconn_, std::move(msg));
 }
 
