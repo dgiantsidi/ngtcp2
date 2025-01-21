@@ -66,17 +66,17 @@ struct FileEntry;
 
 
 struct callable_replication {
-  explicit callable_replication(std::shared_ptr<void> dr, const std::function<void(std::weak_ptr<void>, uint8_t*, size_t)> f) {
+  explicit callable_replication(std::shared_ptr<void> dr, const std::function<void(std::weak_ptr<void>, uint64_t, uint8_t*, size_t)> f) {
     func = f;
     driver = dr;
   }
-  void invoke(uint8_t* data = nullptr, size_t sz = 0) {
+  void invoke(uint64_t req_id, uint8_t* data = nullptr, size_t sz = 0) {
     if (data)
-      func(driver, data, sz);
+      func(driver, req_id, data, sz);
     else 
-      func(driver, nullptr, 0);
+      func(driver, req_id, nullptr, 0);
   }
-  std::function<void(std::weak_ptr<void>,uint8_t*, size_t)> func;
+  std::function<void(std::weak_ptr<void>, uint64_t ,uint8_t*, size_t)> func;
   std::weak_ptr<void> driver;
 };
 
@@ -291,14 +291,12 @@ public:
     return server_id;
   }
 
-  int replicate_cmd(uint8_t* data = nullptr, size_t sz = 0) {
-    // std::cout << __PRETTY_FUNCTION__ << " server_id=" << server_id <<"\n";
-    replication->invoke(data, sz);
+  int replicate_cmd(uint64_t req_id, uint8_t* data = nullptr, size_t sz = 0) {
+    replication->invoke(req_id, data, sz);
     return 0;
   }
 
-  bool cmd_replicated() {
-    // std::cout << __PRETTY_FUNCTION__ << " server_id=" << server_id <<"\n";
+  bool cmd_replicated(uint64_t req_id=0) {
     return true;
   }
 
