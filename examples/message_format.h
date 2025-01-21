@@ -51,7 +51,8 @@ struct quic_message {
         ::memcpy(msg_ptr.get()+offset, &req_id, sizeof(req_id));
         offset+= sizeof(req_id);
         ::memcpy(msg_ptr.get()+offset, &payload_sz, sizeof(payload_sz));
-        //::memcpy(msg_ptr.get() + quic_message::payload_offset(), payload.get(), 6);
+        offset+= sizeof(payload_sz);
+        ::memcpy(msg_ptr.get() + offset, payload.get(), 6);
         return {std::move(msg_ptr), sz};
     }
 };
