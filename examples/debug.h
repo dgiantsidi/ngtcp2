@@ -81,15 +81,13 @@ void print_server_pp_iv(Span<const uint8_t> data);
 void print_client_pp_hp(Span<const uint8_t> data);
 void print_server_pp_hp(Span<const uint8_t> data);
 
-void print_secrets(Span<const uint8_t> secret,
-                   Span<const uint8_t> key, Span<const uint8_t> iv,
-                   Span<const uint8_t> hp);
+void print_secrets(Span<const uint8_t> secret, Span<const uint8_t> key,
+                   Span<const uint8_t> iv, Span<const uint8_t> hp);
 
-void print_secrets(Span<const uint8_t> secret,
-                   Span<const uint8_t> key, Span<const uint8_t> iv);
+void print_secrets(Span<const uint8_t> secret, Span<const uint8_t> key,
+                   Span<const uint8_t> iv);
 
-void print_hp_mask(Span<const uint8_t> mask,
-                   Span<const uint8_t> sample);
+void print_hp_mask(Span<const uint8_t> mask, Span<const uint8_t> sample);
 
 void log_printf(void *user_data, const char *fmt, ...);
 

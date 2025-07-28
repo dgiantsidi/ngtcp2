@@ -149,24 +149,22 @@ void print_server_pp_hp(Span<const uint8_t> data) {
   fprintf(outfile, "+ server_pp_hp=%s\n", util::format_hex(data).c_str());
 }
 
-void print_secrets(Span<const uint8_t> secret,
-                   Span<const uint8_t> key, Span<const uint8_t> iv,
-                   Span<const uint8_t> hp) {
+void print_secrets(Span<const uint8_t> secret, Span<const uint8_t> key,
+                   Span<const uint8_t> iv, Span<const uint8_t> hp) {
   std::cerr << "+ secret=" << util::format_hex(secret) << "\n"
             << "+ key=" << util::format_hex(key) << "\n"
             << "+ iv=" << util::format_hex(iv) << "\n"
             << "+ hp=" << util::format_hex(hp) << std::endl;
 }
 
-void print_secrets(Span<const uint8_t> secret,
-                   Span<const uint8_t> key, Span<const uint8_t> iv) {
+void print_secrets(Span<const uint8_t> secret, Span<const uint8_t> key,
+                   Span<const uint8_t> iv) {
   std::cerr << "+ secret=" << util::format_hex(secret) << "\n"
             << "+ key=" << util::format_hex(key) << "\n"
             << "+ iv=" << util::format_hex(iv) << std::endl;
 }
 
-void print_hp_mask(Span<const uint8_t> mask,
-                   Span<const uint8_t> sample) {
+void print_hp_mask(Span<const uint8_t> mask, Span<const uint8_t> sample) {
   fprintf(outfile, "mask=%s sample=%s\n", util::format_hex(mask).c_str(),
           util::format_hex(sample).c_str());
 }

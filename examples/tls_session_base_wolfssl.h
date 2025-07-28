@@ -47,7 +47,7 @@ public:
   std::string get_negotiated_group() const {
     using namespace std::literals;
 
-    return "";//sv;
+    return ""; // sv;
   }
   std::string get_selected_alpn() const;
   // Keylog is enabled per SSL_CTX.

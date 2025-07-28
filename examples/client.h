@@ -49,11 +49,13 @@
 #include "network.h"
 #include "shared.h"
 #include "template.h"
+#include <linux/netlink.h>
 
 using namespace ngtcp2;
 
 struct Stream {
-  Stream(const Request &req, int64_t stream_id);
+  Stream(const Request &req, int64_t stream_id, void *last_cmt = nullptr);
+
   ~Stream();
 
   int open_file(const std::string_view &path);
@@ -80,6 +82,8 @@ public:
 
   int init(int fd, const Address &local_addr, const Address &remote_addr,
            const char *addr, const char *port, TLSClientContext &tls_ctx);
+  int init_local(int fd, const Address &local_addr, const Address &remote_addr,
+                 const char *addr, const char *port);
   void disconnect();
 
   int on_read(const Endpoint &ep);
@@ -148,9 +152,17 @@ public:
   bool should_exit() const;
 
 private:
+  int kernel_socket_notify = -1;
+  struct sockaddr_nl src_addr, dest_addr;
+  struct msghdr msg;
+  struct iovec iov;
   std::vector<Endpoint> endpoints_;
   Address remote_addr_;
   ev_io wev_;
+  ev_io wev; // local-thread related
+  Address remote_local_addr_;
+  const char *local_addr_;
+  const char *local_port_;
   ev_timer timer_;
   ev_timer change_local_addr_timer_;
   ev_timer key_update_timer_;
