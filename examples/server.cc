@@ -121,8 +121,10 @@ std::string make_status_body(unsigned int status_code,
   auto reason_phrase = http::get_reason_phrase(status_code);
   recv_cmt_msg_t *recv_msg =
     deserialize_recv_cmt(reinterpret_cast<char *>(msg_ptr->payload.get()));
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " " << std::dec << recv_msg->blk_id << " "
             << recv_msg->poolname << "\n";
+#endif
   std::unique_ptr<char[]> buf = std::make_unique<char[]>(
     status_string.size() + reason_phrase.size() + sizeof(msg_ptr->timestamp) +
     sizeof(msg_ptr->req_id) + sizeof(recv_msg->blk_id) +
@@ -147,7 +149,7 @@ std::string make_status_body(unsigned int status_code,
   // body = status_string + " " + reason_phrase +
   // std::to_string(msg_ptr->timestamp) + std::to_string(msg_ptr->req_id);
   // std::cout << __PRETTY_FUNCTION__ << " ---> body=" << body << "\n";
-  print_status_body(body);
+  // print_status_body(body);
   return body;
 }
 } // namespace

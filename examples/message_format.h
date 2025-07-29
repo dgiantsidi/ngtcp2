@@ -11,7 +11,7 @@ struct quic_message {
   template <typename T> using u_ptr = std::unique_ptr<T>;
 
   static void print_quick_message(const quic_message *msg) {
-
+#if 0
     uint64_t blk_id = 0;
     char buf[ZFS_MAX_DATASET_NAME_LEN];
 
@@ -19,7 +19,7 @@ struct quic_message {
     memcpy(buf, msg->payload.get()+ sizeof(blk_id), ZFS_MAX_DATASET_NAME_LEN);
     printf("[%s] quic_message: timestamp=%lu, req_id=%lu, payload_sz=%zu, zil_blk_id=%lu, poolname=%s\n",
            __func__, msg->timestamp, msg->req_id, msg->payload_sz, blk_id, buf);
-    
+#endif
   }
 
   static constexpr size_t payload_offset() {
@@ -52,14 +52,15 @@ struct quic_message {
     ::memcpy(&(ptr->payload_sz), data + offset, sizeof(k_payload_sz));
     offset += sizeof(k_payload_sz);
     ptr->payload = std::make_unique<uint8_t[]>(ptr->payload_sz);
-    std::cout << "quic_message::deserialize_me: payload_sz=" << ptr->payload_sz << std::endl;
+    // std::cout << "quic_message::deserialize_me: payload_sz=" <<
+    // ptr->payload_sz << std::endl;
     ::memcpy(ptr->payload.get(), data + offset, ptr->payload_sz);
-    #if 0
+#if 0
     for (auto i = 0ULL; i < ptr->payload_sz; ++i) {
       std::cout << std::hex << (int)ptr->payload.get()[i] << " ";
     }
     std::cout << "\n";
-    #endif
+#endif
     return std::move(ptr);
   }
 

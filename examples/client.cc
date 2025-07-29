@@ -205,7 +205,7 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
       std::cerr << "read: " << strerror(errno) << std::endl;
       return;
     } else if (n == 0) {
-      std::cout << "No more notifications." << std::endl;
+      // std::cout << "No more notifications." << std::endl;
       return;
     }
 #if 0
@@ -814,8 +814,6 @@ int Client::init_local(int fd, const Address &local_addr,
   local_addr_ = addr;
   local_port_ = port;
   wev.data = this;
-  ev_io_start(loop_, &wev);
-  ev_signal_start(loop_, &sigintev_);
 
   kernel_socket_notify = socket(PF_NETLINK, SOCK_RAW, NOTIFY_CMTS_SOCK);
   if (kernel_socket_notify < 0) {
@@ -828,7 +826,8 @@ int Client::init_local(int fd, const Address &local_addr,
   src_addr.nl_pid = getpid(); /* self pid */
   src_addr.nl_groups = 0;     /* not in mcast groups */
   bind(kernel_socket_notify, (struct sockaddr *)&src_addr, sizeof(src_addr));
-
+  ev_io_start(loop_, &wev);
+  ev_signal_start(loop_, &sigintev_);
   return 0;
 }
 
@@ -2119,7 +2118,7 @@ int Client::on_extend_max_streams() {
   }
 #endif
 
-  if (true) { // todo: I fetch the commitments here
+  if (nstreams_done_ < 10000000) { // todo: I fetch the commitments here
     // std::cout << __PRETTY_FUNCTION__ << " count=" << count++ << " \n";
 
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
@@ -2306,19 +2305,21 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
   if (acks.load() % 100000 == 0)
     std::cout << "acks no=" << acks.load() << "\n";
   if (server_reply.size() != k_msg_size) {
-#if 1
+#if 0
     std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
               << " server reply size mismatch: " << server_reply.size()
               << " != " << k_msg_size << " (expected)" << "\n";
-    fragmented_reply = true;
 #endif
+    fragmented_reply = true;
   }
 
   if (fragmented_reply) {
     auto it = streams_.find(stream_id);
     if (it == std::end(streams_)) {
+#if 0
       std::cerr << __PRETTY_FUNCTION__ << " stream=" << stream_id
                 << " not found ..\n";
+#endif
       goto out;
     }
 
@@ -2331,17 +2332,27 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     if (stream->stream_data.size() == k_msg_size) {
       fragmented_reply = false;
       server_reply = stream->stream_data;
+    } else {
+      goto out;
     }
   }
   if (!fragmented_reply) {
     auto it = streams_.find(stream_id);
     if (it == std::end(streams_)) {
-      assert(false);
+      // assert(false);
+      std::cout << __PRETTY_FUNCTION__ << " stream=" << stream_id
+                << " not found ..\n";
       goto out;
     }
     auto &stream = (*it).second;
     if (stream->stream_data.size() == 0) {
       stream->stream_data.append(server_reply.data(), server_reply.size());
+    }
+    if (stream->stream_data.size() != k_msg_size) {
+      std::cerr << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+                << " server reply size mismatch: " << stream->stream_data.size()
+                << " != " << k_msg_size << " (expected)" << "\n";
+      goto out;
     }
     uint64_t timestamp = -1;
     ::memcpy(&timestamp, server_reply.data() + 6, sizeof(timestamp));
@@ -2350,7 +2361,8 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
 
     ::memcpy(&req_id, server_reply.data() + 6 + sizeof(timestamp),
              sizeof(req_id));
-    // std::cout << "timestamp=" << timestamp << " req_id=" << req_id <<"\n";
+    // std::cout << "stream_id=" << stream_id << " timestamp=" << timestamp << "
+    // req_id=" << req_id <<"\n";
 
     uint64_t zil_blk_id = -1;
     ::memcpy(&zil_blk_id,
@@ -2371,7 +2383,8 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     }
 
     if (latencies_table[stream_id]->req_id != req_id) {
-      std::cerr << __PRETTY_FUNCTION__ << " request ids do not match "
+      std::cerr << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+                << " request ids do not match "
                 << latencies_table[stream_id]->req_id << " " << req_id << "\n";
       exit(-1);
     }
@@ -2381,12 +2394,13 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
                 << "\n";
       exit(-1);
     }
+#if 0
     std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
               << ", data_sz=" << server_reply.size() << ", req_id=" << req_id
               << ", timestamp=" << timestamp << "ns, latency=" << latency
               << " ns," << " zil_blk_id=" << zil_blk_id
               << ", poolname=" << poolname << "\n";
-
+#endif
     // todo: notify the kernel about the acked commitment
     memset(&dest_addr, 0, sizeof(dest_addr));
     dest_addr.nl_family = AF_NETLINK;
@@ -2868,6 +2882,7 @@ int run(Client &c, const char *addr, const char *port,
     std::cout << "Could not create notification socket" << std::endl;
     return -1;
   }
+
   int server_fd = notification_fd;
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
@@ -2897,6 +2912,21 @@ int run(Client &c, const char *addr, const char *port,
     return 1;
   }
 
+#if 1
+  // Set the socket to non-blocking mode
+  int flags = fcntl(client_fd, F_GETFL, 0);
+  if (flags == -1) {
+    perror("fcntl(F_GETFL)");
+    close(client_fd);
+    return 1;
+  }
+
+  if (fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    perror("fcntl(F_SETFL)");
+    close(client_fd);
+    return 1;
+  }
+#endif
   std::cout << "Client connected!" << std::endl;
 
   if (c.init(fd, local_addr, remote_addr, addr, port, tls_ctx) != 0) {
@@ -3280,7 +3310,20 @@ static void thread_func_get_cmt() {
 
   // connect to the server
   if (connect(sockfd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror("connect");
+    perror("error in connecting to server");
+    close(sockfd);
+    return;
+  }
+  // Set the socket to non-blocking mode
+  int flags = fcntl(sockfd, F_GETFL, 0);
+  if (flags == -1) {
+    perror("fcntl(F_GETFL)");
+    close(sockfd);
+    return;
+  }
+
+  if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    perror("fcntl(F_SETFL)");
     close(sockfd);
     return;
   }
@@ -3371,8 +3414,8 @@ static void thread_func_get_cmt() {
       // exit(0);
     }
 #ifdef PRINT
-    printf("received from kernel: {blk_id=%ld, %s, cmt=%s}\n", recv_msg->blk_id,
-           recv_msg->poolname, recv_msg->tail_commitment);
+    printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
+           recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
 #endif
 
     recv_queue.push(recv_msg); // push the received message to the queue
