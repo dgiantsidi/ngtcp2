@@ -63,6 +63,7 @@ struct Stream {
   Request req;
   int64_t stream_id;
   int fd;
+  std::string stream_data;
 };
 
 class Client;

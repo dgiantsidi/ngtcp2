@@ -119,11 +119,14 @@ std::string make_status_body(unsigned int status_code,
   auto status_string = util::format_uint(status_code);
   status_string += " ";
   auto reason_phrase = http::get_reason_phrase(status_code);
-  recv_cmt_msg_t* recv_msg = deserialize_recv_cmt(reinterpret_cast<char*>(msg_ptr->payload.get()));
-  std::cout << __PRETTY_FUNCTION__ << " " << std::dec <<  recv_msg->blk_id << " " << recv_msg->poolname << "\n";
+  recv_cmt_msg_t *recv_msg =
+    deserialize_recv_cmt(reinterpret_cast<char *>(msg_ptr->payload.get()));
+  std::cout << __PRETTY_FUNCTION__ << " " << std::dec << recv_msg->blk_id << " "
+            << recv_msg->poolname << "\n";
   std::unique_ptr<char[]> buf = std::make_unique<char[]>(
     status_string.size() + reason_phrase.size() + sizeof(msg_ptr->timestamp) +
-    sizeof(msg_ptr->req_id) + sizeof(recv_msg->blk_id) + ZFS_MAX_DATASET_NAME_LEN);
+    sizeof(msg_ptr->req_id) + sizeof(recv_msg->blk_id) +
+    ZFS_MAX_DATASET_NAME_LEN);
 
   size_t offset = 0;
   ::memcpy(buf.get(), status_string.data(), status_string.size());

@@ -54,10 +54,12 @@ struct quic_message {
     ptr->payload = std::make_unique<uint8_t[]>(ptr->payload_sz);
     std::cout << "quic_message::deserialize_me: payload_sz=" << ptr->payload_sz << std::endl;
     ::memcpy(ptr->payload.get(), data + offset, ptr->payload_sz);
+    #if 0
     for (auto i = 0ULL; i < ptr->payload_sz; ++i) {
       std::cout << std::hex << (int)ptr->payload.get()[i] << " ";
     }
     std::cout << "\n";
+    #endif
     return std::move(ptr);
   }
 

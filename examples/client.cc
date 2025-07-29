@@ -64,6 +64,8 @@
 using namespace ngtcp2;
 using namespace std::literals;
 
+constexpr size_t k_msg_size = (6 + sizeof(uint64_t) * 2 + sizeof(uint64_t) +
+                              ZFS_MAX_DATASET_NAME_LEN);
 struct statistics {
   statistics() = default;
 
@@ -194,8 +196,7 @@ void writecb(struct ev_loop *loop, ev_io *w, int revents) {
 namespace {
 void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
   static int count = 0;
-  std::cout << " #################################### " << __PRETTY_FUNCTION__
-            << "\n";
+
   if (revents & EV_READ) {
     char buffer[1024];
     size_t n = read(w->fd, buffer, 22);
@@ -206,8 +207,10 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
       std::cout << "No more notifications." << std::endl;
       return;
     }
+#if 0
     std::cout << "##### Received notification: " << std::string(buffer, n)
               << " count=" << count << "\n";
+#endif
     writecb(loop, w, revents);
     count++;
   }
@@ -217,7 +220,8 @@ void readcb(struct ev_loop *loop, ev_io *w, int revents) {
   auto ep = static_cast<Endpoint *>(w->data);
   auto c = ep->client;
   static int count = 0;
-  std::cout << __PRETTY_FUNCTION__ << " count=" << count++ << "\n";
+
+  // std::cout << __PRETTY_FUNCTION__ << " count=" << count++ << "\n";
 
   if (c->on_read(*ep) != 0) {
     std::cerr << "on_read failed" << std::endl;
@@ -814,10 +818,9 @@ int Client::init_local(int fd, const Address &local_addr,
 
   kernel_socket_notify = socket(PF_NETLINK, SOCK_RAW, NOTIFY_CMTS_SOCK);
   if (kernel_socket_notify < 0) {
-    printf("error creating the socket of type=%s, errno: %s\n", \
-      get_socket_type(NOTIFY_CMTS_SOCK), \
-      strerror(errno));
-     exit(1);
+    printf("error creating the socket of type=%s, errno: %s\n",
+           get_socket_type(NOTIFY_CMTS_SOCK), strerror(errno));
+    exit(1);
   }
   memset(&src_addr, 0, sizeof(src_addr));
   src_addr.nl_family = AF_NETLINK;
@@ -1090,7 +1093,7 @@ int Client::on_read(const Endpoint &ep) {
   sockaddr_union su;
   size_t pktcnt = 0;
   ngtcp2_pkt_info pi;
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
   iovec msg_iov;
   msg_iov.iov_base = buf.data();
   msg_iov.iov_len = buf.size();
@@ -1196,7 +1199,7 @@ int Client::handle_expiry() {
 }
 
 int Client::on_write() {
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
   if (tx_.send_blocked) {
     if (auto rv = send_blocked_packet(); rv != 0) {
       return rv;
@@ -1226,7 +1229,7 @@ int Client::on_write() {
 }
 
 int Client::write_streams() {
-  std::cout << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << "\n";
 
   std::array<nghttp3_vec, 16> vec;
   ngtcp2_path_storage ps, prev_ps;
@@ -1995,6 +1998,17 @@ int Client::handle_error() {
 }
 
 int Client::on_stream_close(int64_t stream_id, uint64_t app_error_code) {
+  auto it = streams_.find(stream_id);
+  if (it == std::end(streams_)) {
+    std::cerr << __PRETTY_FUNCTION__ << " stream=" << stream_id <<" not found ..\n";
+    return 0;
+  }
+
+  auto &stream = (*it).second;
+  if (stream->stream_data.size() < k_msg_size) {
+      std::cout << "ERROR! " << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << " "
+            << stream->stream_data.size() << "\n";
+  }
   if (httpconn_) {
     if (app_error_code == 0) {
       app_error_code = NGHTTP3_H3_NO_ERROR;
@@ -2081,7 +2095,7 @@ static std::tuple<bool, int> wait_until_received_ack(int cur_req_no) {
 int Client::on_extend_max_streams() {
   int64_t stream_id;
   static int count = 0;
-  std::cout << __PRETTY_FUNCTION__ << " count=" << count << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << " count=" << count << "\n";
   count++;
   if ((config.delay_stream && !handshake_confirmed_) ||
       ev_is_active(&delay_stream_timer_)) {
@@ -2104,13 +2118,14 @@ int Client::on_extend_max_streams() {
 #endif
 
   if (true) { // todo: I fetch the commitments here
-    std::cout << __PRETTY_FUNCTION__ << " count=" << count++ << " \n";
+    // std::cout << __PRETTY_FUNCTION__ << " count=" << count++ << " \n";
 
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
       assert(NGTCP2_ERR_STREAM_ID_BLOCKED == rv);
-      std::cerr << "ngtcp2_conn_open_bidi_stream:" << ngtcp2_strerror(rv)
-                << std::endl;
+
+      // std::cerr << "ngtcp2_conn_open_bidi_stream:" << ngtcp2_strerror(rv)
+      //          << std::endl;
       return 0;
     }
 
@@ -2154,9 +2169,11 @@ serialize_last_cmt_into_char(recv_cmt_msg_t *cmt) {
               << "\n";
     assert(false);
   }
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " blk_id=" << cmt->blk_id
             << " poolname=" << cmt->poolname
             << "\n";
+#endif
   return {std::move(ptr), sizeof(recv_cmt_msg_t)};
 }
 
@@ -2166,43 +2183,47 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   // @dimitra: add timestamp
   auto ts = util::timestamp();
   recv_cmt_msg_t *last_cmt = recv_queue.pop();
+  if (last_cmt == nullptr) {
+#if 0
+    std::cerr << __PRETTY_FUNCTION__ << " last_cmt is nullptr\n";
+#endif
+    last_cmt = (recv_cmt_msg_t *)malloc(sizeof(recv_cmt_msg_t));
+    last_cmt->blk_id = 0;
+  }
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " : " << ts
             << " ns, to send cmt about blk_id=" << last_cmt->blk_id
             << " config.datalen=" << config.datalen << "\n";
-
+#endif
   std::unique_ptr<quic_message> msg_ptr =
     quic_message::construct_message(ts, global_req_id.load());
   msg_ptr->payload_sz = 816;
   msg_ptr->payload = std::make_unique<uint8_t[]>(config.datalen);
 
   auto [serialized_cmt, cmt_sz] = ::serialize_last_cmt_into_char(last_cmt);
-  ::memcpy(msg_ptr->payload.get(), serialized_cmt.get(),
-           cmt_sz);
+  ::memcpy(msg_ptr->payload.get(), serialized_cmt.get(), cmt_sz);
 
   free(last_cmt);
-  std::cout << "\n";
+
   // todo: this is an extra memcpy, maybe use the msg_ptr->paylaod to construct
   // the message and copy this to config.data
   auto [ptr, sz] = msg_ptr->serialize_me(config.datalen);
   ::memcpy(config.data, ptr.get(), sz);
 
+#if 0
   std::cout << "[";
   for (auto i = 0ULL; i < (5 + sz); i++)
     std::cout << (char)(config.data + quic_message::payload_offset())[i];
   std::cout << "]\n";
+#endif
 
-  //::memcpy((config.data + 6), &ts, sizeof(ts));
-  // std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << " ts=" <<
-  // ts;
   vec[0].base = config.data;
   latencies_table.insert(
     std::make_pair(stream_id, std::make_unique<statistics>()));
   latencies_table[stream_id]->tx_timestamp = ts;
   latencies_table[stream_id]->req_id = msg_ptr->req_id;
   latencies_table[stream_id]->stream_id = stream_id;
-  // std::cout << __PRETTY_FUNCTION__ << " ts=" << ts << " req_id=" <<
-  // msg_ptr->req_id << "\n";
-  //::memcpy((config.data + 6 + sizeof(ts)), &stream_id, sizeof(stream_id));
+
   vec[0].len = config.datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
   global_req_id.fetch_add(1);
@@ -2213,7 +2234,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 
 int Client::submit_http_request(const Stream *stream) {
   static int count = 0;
-  std::cout << __PRETTY_FUNCTION__ << " count=" << count << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << " count=" << count << "\n";
   count++;
   std::string content_length_str;
   const auto &req = stream->req;
@@ -2271,7 +2292,7 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
       0);
     return -1;
   }
-  
+  bool fragmented_reply = false;
   std::string server_reply;
   for (auto i = 0; i < (data.size() - nconsumed); i++) {
     // std::cout << data[nconsumed + i];
@@ -2279,17 +2300,50 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     server_reply += buffer;
   }
   // std::cout << "\n [" << server_reply << "]\n";
-  if (server_reply.find("200 OK") == 0) {
-    acks.fetch_add(1);
-    if (acks.load() % 100000 == 0)
-      std::cout << "acks no=" << acks.load() << "\n";
-    if (server_reply.size() != (6 + sizeof(uint64_t) * 2)) {
-      #if 0
-      std::cerr << __PRETTY_FUNCTION__
-                << " server reply size mismatch: " << server_reply.size()
-                << " server_reply=" << server_reply
-                << " != " << (6 + sizeof(uint64_t) * 2) << "\n";
-      #endif
+
+  acks.fetch_add(1);
+  if (acks.load() % 100000 == 0)
+    std::cout << "acks no=" << acks.load() << "\n";
+  if (server_reply.size() != k_msg_size) {
+#if 1
+    std::cout << __PRETTY_FUNCTION__
+              << " stream_id=" << stream_id
+              << " server reply size mismatch: " << server_reply.size()
+              << " != "
+              << k_msg_size 
+              << " (expected)"
+              << "\n";
+    fragmented_reply = true;
+#endif
+  }
+
+  if (fragmented_reply) {
+    auto it = streams_.find(stream_id);
+    if (it == std::end(streams_)) {
+      std::cerr << __PRETTY_FUNCTION__ << " stream=" << stream_id << " not found ..\n";
+      goto out;
+    }
+
+    auto &stream = (*it).second;
+    #if 0
+    std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+              << " data.size()=" << data.size() << "\n";
+    #endif
+    stream->stream_data.append(server_reply.data(), server_reply.size());
+    if (stream->stream_data.size() == k_msg_size) {
+      fragmented_reply = false;
+      server_reply = stream->stream_data;
+    }
+  }
+  if (!fragmented_reply) {
+    auto it = streams_.find(stream_id);
+    if (it == std::end(streams_)) {
+      assert(false);
+      goto out;
+    }
+    auto &stream = (*it).second;
+    if (stream->stream_data.size() == 0) {
+      stream->stream_data.append(server_reply.data(), server_reply.size());
     }
     uint64_t timestamp = -1;
     ::memcpy(&timestamp, server_reply.data() + 6, sizeof(timestamp));
@@ -2301,18 +2355,21 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     // std::cout << "timestamp=" << timestamp << " req_id=" << req_id <<"\n";
 
     uint64_t zil_blk_id = -1;
-    ::memcpy(&zil_blk_id, server_reply.data() + 6 + sizeof(timestamp) + sizeof(req_id),
-              sizeof(zil_blk_id));
+    ::memcpy(&zil_blk_id,
+             server_reply.data() + 6 + sizeof(timestamp) + sizeof(req_id),
+             sizeof(zil_blk_id));
     char poolname[ZFS_MAX_DATASET_NAME_LEN];
-    ::memcpy(poolname, server_reply.data() + 6 + sizeof(timestamp) + sizeof(req_id) + sizeof(zil_blk_id),
-              ZFS_MAX_DATASET_NAME_LEN);
+    ::memcpy(poolname,
+             server_reply.data() + 6 + sizeof(timestamp) + sizeof(req_id) +
+               sizeof(zil_blk_id),
+             ZFS_MAX_DATASET_NAME_LEN);
     auto now = util::timestamp();
     auto latency = now - timestamp;
     latencies_table[stream_id]->ack_timestamp = now;
     latencies_table[stream_id]->acked = true;
     if (acks.load() != (req_id + 1)) {
-      std::cerr << __PRETTY_FUNCTION__ << " problem\n";
-      exit(-1);
+      // std::cerr << __PRETTY_FUNCTION__ << " problem\n";
+      // exit(-1);
     }
 
     if (latencies_table[stream_id]->req_id != req_id) {
@@ -2326,25 +2383,25 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
                 << "\n";
       exit(-1);
     }
-    std::cout << __PRETTY_FUNCTION__ << " req_id=" << req_id
-              << ", timestamp=" << timestamp << "ns, latency=" << latency 
-              << " ns,"
-              << " zil_blk_id=" << zil_blk_id
-              << ", poolname=" << poolname
-              << "\n";
-     // todo: notify the kernel about the acked commitment
+    std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id << ", data_sz=" << server_reply.size() << ", req_id=" << req_id
+              << ", timestamp=" << timestamp << "ns, latency=" << latency
+              << " ns," << " zil_blk_id=" << zil_blk_id
+              << ", poolname=" << poolname << "\n";
+
+    // todo: notify the kernel about the acked commitment
     memset(&dest_addr, 0, sizeof(dest_addr));
     dest_addr.nl_family = AF_NETLINK;
     dest_addr.nl_pid = 0;    /* For Linux Kernel */
     dest_addr.nl_groups = 0; /* unicast */
 
-    struct nlmsghdr *nlh = (struct nlmsghdr*) malloc(NLMSG_SPACE(sizeof(notify_cmt_msg_t)));
+    struct nlmsghdr *nlh =
+      (struct nlmsghdr *)malloc(NLMSG_SPACE(sizeof(notify_cmt_msg_t)));
 
     /* fill the netlink message header */
     nlh->nlmsg_len = NLMSG_SPACE(sizeof(notify_cmt_msg_t));
     nlh->nlmsg_pid = getpid(); /* self pid */
     nlh->nlmsg_flags = 0;
-     char* tx_msg = serialize_notify_cmt_into_char(poolname, zil_blk_id);
+    char *tx_msg = serialize_notify_cmt_into_char(poolname, zil_blk_id);
     /* fill in the netlink message payload */
     memcpy(NLMSG_DATA(nlh), tx_msg, sizeof(notify_cmt_msg_t));
 
@@ -2360,9 +2417,10 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
 
     uint64_t blk_id = 0;
     memcpy(&blk_id, tx_msg, sizeof(uint64_t));
-    #ifdef PRINT
-    printf("%s send to kernel: {%ld, %dB}\n", __func__, zil_blk_id, nlh->nlmsg_len);
-    #endif
+#ifdef PRINT
+    printf("%s send to kernel: {%ld, %dB}\n", __func__, zil_blk_id,
+           nlh->nlmsg_len);
+#endif
     int rc = sendmsg(kernel_socket_notify, &msg, 0);
     if (rc < 0) {
       printf("error seding the message: %s\n", strerror(errno));
@@ -2371,16 +2429,15 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     }
     free(nlh);
     free(tx_msg);
-    std::vector<recv_cmt_msg_t*> to_be_deleted = recv_queue.pop_until_blk_id(zil_blk_id);
-    //printf("delete about %d entries from the queue with last_blk_id=%ld\n", to_be_deleted.size(), last_blk_id);
-    for (auto& buf : to_be_deleted) {
+    std::vector<recv_cmt_msg_t *> to_be_deleted =
+      recv_queue.pop_until_blk_id(zil_blk_id);
+    // printf("delete about %d entries from the queue with last_blk_id=%ld\n",
+    // to_be_deleted.size(), last_blk_id);
+    for (auto &buf : to_be_deleted) {
       free(buf); // free the messages that were popped from the queue
     }
-
-  } else {
-    // std::cout << " ##### irrelevant message #####\n";
   }
-
+out:
   ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
   ngtcp2_conn_extend_max_offset(conn_, nconsumed);
 
@@ -2474,16 +2531,17 @@ void Client::http_consume(int64_t stream_id, size_t nconsumed) {
 }
 
 void Client::http_write_data(int64_t stream_id, Span<const uint8_t> data) {
-  // std::cout <<">>>>>>>>>>>>> "<<  __PRETTY_FUNCTION__ << " \n";
-
   auto it = streams_.find(stream_id);
   if (it == std::end(streams_)) {
-    std::cerr << "Error: " << __PRETTY_FUNCTION__ << " stream not found ..\n";
+    std::cerr << __PRETTY_FUNCTION__ << " stream=" << stream_id<< " not found ..\n";
     return;
   }
 
   auto &stream = (*it).second;
-
+  #if 0
+  std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+            << " data.size()=" << data.size() << "\n";
+  #endif
   if (stream->fd == -1) {
     // std::cout << __PRETTY_FUNCTION__ << "\nTODO: we do not write the
     // following data to a file\n"; for (auto& elem : data) std::cout << elem;
@@ -2619,6 +2677,10 @@ int http_stream_close(nghttp3_conn *conn, int64_t stream_id,
                       uint64_t app_error_code, void *conn_user_data,
                       void *stream_user_data) {
   auto c = static_cast<Client *>(conn_user_data);
+  #if 0
+  std::cout << ">>>>>>>>>>>>> " << __PRETTY_FUNCTION__
+            << " stream_id=" << stream_id << " \n";
+  #endif
   if (c->http_stream_close(stream_id, app_error_code) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }
@@ -3284,7 +3346,7 @@ static void thread_func_get_cmt() {
     if (rc < 0) {
       printf("error sending the message: %s\n", strerror(errno));
       close(sock_fd);
-      exit (1);
+      exit(1);
       return;
     }
 
@@ -3293,9 +3355,10 @@ static void thread_func_get_cmt() {
 
     rc = recvmsg(sock_fd, &msg, 0);
     if (rc < 0) {
-      printf("recvmsg: error in receiving the msg from kernel: %s\n", strerror(errno));
+      printf("recvmsg: error in receiving the msg from kernel: %s\n",
+             strerror(errno));
       close(sock_fd);
-      exit (1);
+      exit(1);
 
       return;
     }
@@ -3307,7 +3370,7 @@ static void thread_func_get_cmt() {
              expected_blk_id);
       // exit(0);
     }
-#ifndef PRINT
+#ifdef PRINT
     printf("received from kernel: {blk_id=%ld, %s, cmt=%s}\n", recv_msg->blk_id,
            recv_msg->poolname, recv_msg->tail_commitment);
 #endif
@@ -3318,9 +3381,8 @@ static void thread_func_get_cmt() {
     expected_blk_id++;
 
     send(sockfd, "Hello from cmt thread", 22, 0);
-    std::cout << "Sent message from cmt thread" << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-
+    // std::cout << "Sent message from cmt thread" << std::endl;
+    // std::this_thread::sleep_for(std::chrono::seconds(5));
   }
   // todo: send cmt
   // std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -3745,257 +3807,4 @@ int main(int argc, char **argv) {
             continue;
           }
           auto rv = util::parse_version(k);
-          if (!rv) {
-            std::cerr << "available-versions: invalid version "
-                      << std::quoted(k) << std::endl;
-            exit(EXIT_FAILURE);
-          }
-          *it++ = *rv;
-        }
-        break;
-      }
-      case 38:
-        // --no-pmtud
-        config.no_pmtud = true;
-        break;
-      case 39: {
-        // --preferred-versions
-        auto l = util::split_str(optarg);
-        if (l.size() > max_preferred_versionslen) {
-          std::cerr << "preferred-versions: too many versions > "
-                    << max_preferred_versionslen << std::endl;
-        }
-        config.preferred_versions.resize(l.size());
-        auto it = std::begin(config.preferred_versions);
-        for (const auto &k : l) {
-          if (k == "v1"sv) {
-            *it++ = NGTCP2_PROTO_VER_V1;
-            continue;
-          }
-          if (k == "v2"sv) {
-            *it++ = NGTCP2_PROTO_VER_V2;
-            continue;
-          }
-          auto rv = util::parse_version(k);
-          if (!rv) {
-            std::cerr << "preferred-versions: invalid version "
-                      << std::quoted(k) << std::endl;
-            exit(EXIT_FAILURE);
-          }
-          if (!ngtcp2_is_supported_version(*rv)) {
-            std::cerr << "preferred-versions: unsupported version "
-                      << std::quoted(k) << std::endl;
-            exit(EXIT_FAILURE);
-          }
-          *it++ = *rv;
-        }
-        break;
-      }
-      case 40:
-        // --ack-thresh
-        if (auto n = util::parse_uint(optarg); !n) {
-          std::cerr << "ack-thresh: invalid argument" << std::endl;
-          exit(EXIT_FAILURE);
-        } else if (*n > 100) {
-          std::cerr << "ack-thresh: must not exceed 100" << std::endl;
-          exit(EXIT_FAILURE);
-        } else {
-          config.ack_thresh = *n;
-        }
-        break;
-      case 41:
-        // --wait-for-ticket
-        config.wait_for_ticket = true;
-        break;
-      case 42:
-        // --initial-pkt-num
-        if (auto n = util::parse_uint(optarg); !n) {
-          std::cerr << "initial-pkt-num: invalid argument" << std::endl;
-          exit(EXIT_FAILURE);
-        } else if (*n > INT32_MAX) {
-          std::cerr << "initial-pkt-num: must not exceed (1 << 31) - 1"
-                    << std::endl;
-          exit(EXIT_FAILURE);
-        } else {
-          config.initial_pkt_num = static_cast<uint32_t>(*n);
-        }
-        break;
-      case 43: {
-        // --pmtud-probes
-        auto l = util::split_str(optarg);
-        for (auto &s : l) {
-          if (auto n = util::parse_uint_iec(s); !n) {
-            std::cerr << "pmtud-probes: invalid argument" << std::endl;
-            exit(EXIT_FAILURE);
-          } else if (*n <= 1200 || *n >= 64_k) {
-            std::cerr
-              << "pmtud-probes: must be in range [1201, 65535], inclusive."
-              << std::endl;
-            exit(EXIT_FAILURE);
-          } else {
-            config.pmtud_probes.push_back(*n);
-          }
-        }
-        break;
-      }
-      }
-      break;
-    default:
-      break;
-    };
-  }
-
-  if (argc - optind < 2) {
-    std::cerr << "Too few arguments" << std::endl;
-    print_usage();
-    exit(EXIT_FAILURE);
-  }
-
-  if (!config.qlog_file.empty() && !config.qlog_dir.empty()) {
-    std::cerr << "qlog-file and qlog-dir are mutually exclusive" << std::endl;
-    exit(EXIT_FAILURE);
-  }
-
-  if (config.exit_on_first_stream_close && config.exit_on_all_streams_close) {
-    std::cerr << "exit-on-first-stream-close and exit-on-all-streams-close are "
-                 "mutually exclusive"
-              << std::endl;
-    exit(EXIT_FAILURE);
-  }
-
-  if (config.wait_for_ticket && !config.session_file) {
-    std::cerr << "wait-for-ticket: session-file must be specified" << std::endl;
-    exit(EXIT_FAILURE);
-  }
-
-  //  std::cout <<
-  //  ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
-  if (data_path) {
-    //  std::cout << "HERE\n";
-    auto fd = open(data_path, O_RDONLY);
-    if (fd == -1) {
-      std::cerr << "data: Could not open file " << data_path << ": "
-                << strerror(errno) << std::endl;
-      exit(EXIT_FAILURE);
-    }
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-      std::cerr << "data: Could not stat file " << data_path << ": "
-                << strerror(errno) << std::endl;
-      exit(EXIT_FAILURE);
-    }
-    config.fd = fd;
-    config.datalen = st.st_size;
-    if (config.datalen) {
-      auto addr = mmap(nullptr, config.datalen, PROT_READ, MAP_SHARED, fd, 0);
-      if (addr == MAP_FAILED) {
-        std::cerr << "data: Could not mmap file " << data_path << ": "
-                  << strerror(errno) << std::endl;
-        exit(EXIT_FAILURE);
-      }
-      config.data = new uint8_t[1024]; // static_cast<uint8_t *>(addr);
-      config.datalen = 1024;
-      config.data[0] = 'P';
-      config.data[1] = 'U';
-      config.data[2] = 'T';
-      config.data[3] = ' ';
-      config.data[4] = 'X';
-      config.data[5] = ' ';
-    }
-    //  std::cout << "config.fd="<< config.fd << " config.datalen=" <<
-    //  config.datalen << "\n";
-  }
-  std::cout << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
-               ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
-
-  auto addr = argv[optind++];
-  auto port = argv[optind++];
-
-  if (parse_requests(&argv[optind], argc - optind) != 0) {
-    exit(EXIT_FAILURE);
-  }
-
-  if (!ngtcp2_is_reserved_version(config.version)) {
-    if (!config.preferred_versions.empty() &&
-        std::find(std::begin(config.preferred_versions),
-                  std::end(config.preferred_versions),
-                  config.version) == std::end(config.preferred_versions)) {
-      std::cerr << "preferred-version: must include version " << std::hex
-                << "0x" << config.version << std::dec << std::endl;
-      exit(EXIT_FAILURE);
-    }
-
-    if (!config.available_versions.empty() &&
-        std::find(std::begin(config.available_versions),
-                  std::end(config.available_versions),
-                  config.version) == std::end(config.available_versions)) {
-      std::cerr << "available-versions: must include version " << std::hex
-                << "0x" << config.version << std::dec << std::endl;
-      exit(EXIT_FAILURE);
-    }
-  }
-
-  if (config.nstreams == 0) {
-    config.nstreams = config.requests.size();
-  }
-
-  TLSClientContext tls_ctx;
-  if (tls_ctx.init(private_key_file, cert_file) != 0) {
-    exit(EXIT_FAILURE);
-  }
-
-  auto ev_loop_d = defer(ev_loop_destroy, EV_DEFAULT);
-
-  auto keylog_filename = getenv("SSLKEYLOGFILE");
-  if (keylog_filename) {
-    keylog_file.open(keylog_filename, std::ios_base::app);
-    if (keylog_file) {
-      tls_ctx.enable_keylog();
-    }
-  }
-
-  if (util::generate_secret(config.static_secret) != 0) {
-    std::cerr << "Unable to generate static secret" << std::endl;
-    exit(EXIT_FAILURE);
-  }
-
-  auto client_chosen_version = config.version;
-  int count = 0;
-  for (;;) {
-    Client c(EV_DEFAULT, client_chosen_version, config.version);
-
-    if (run(c, addr, port, tls_ctx) != 0) {
-      exit(EXIT_FAILURE);
-    }
-
-    if (config.preferred_versions.empty()) {
-      break;
-    }
-
-    auto &offered_versions = c.get_offered_versions();
-    if (offered_versions.empty()) {
-      break;
-    }
-
-    client_chosen_version = ngtcp2_select_version(
-      config.preferred_versions.data(), config.preferred_versions.size(),
-      offered_versions.data(), offered_versions.size());
-
-    if (client_chosen_version == 0) {
-      std::cerr << "Unable to select a version" << std::endl;
-      exit(EXIT_FAILURE);
-    }
-
-    if (!config.quiet) {
-      std::cerr << "Client selected version " << std::hex << "0x"
-                << client_chosen_version << std::dec << std::endl;
-    }
-  }
-
-  std::cout << latencies_table << "\n";
-  auto [avg_lat, std_lat] = compute_avg_latency(latencies_table);
-  std::cout << "avg_lat = " << avg_lat << " std_lat=" << std_lat << " over "
-            << latencies_table.size() << " reqs\n";
-  get_cmt_thread.join();
-  return EXIT_SUCCESS;
-}
+        
