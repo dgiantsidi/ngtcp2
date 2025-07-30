@@ -2223,11 +2223,13 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 #endif
 
   vec[0].base = config.data;
-  latencies_table.insert(
-    std::make_pair(stream_id, std::make_unique<statistics>()));
-  latencies_table[stream_id]->tx_timestamp = ts;
-  latencies_table[stream_id]->req_id = msg_ptr->req_id;
-  latencies_table[stream_id]->stream_id = stream_id;
+  if (global_req_id.load() % 10000 == 0) {
+    latencies_table.insert(
+      std::make_pair(stream_id, std::make_unique<statistics>()));
+    latencies_table[stream_id]->tx_timestamp = ts;
+    latencies_table[stream_id]->req_id = msg_ptr->req_id;
+    latencies_table[stream_id]->stream_id = stream_id;
+  }
 
   vec[0].len = config.datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
@@ -2286,6 +2288,7 @@ int Client::submit_http_request(const Stream *stream) {
 
 int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
                              Span<const uint8_t> data) {
+  bool collect_statistics = false;
   auto nconsumed =
     nghttp3_conn_read_stream(httpconn_, stream_id, data.data(), data.size(),
                              flags & NGTCP2_STREAM_DATA_FLAG_FIN);
@@ -2379,31 +2382,41 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
              ZFS_MAX_DATASET_NAME_LEN);
     auto now = util::timestamp();
     auto latency = now - timestamp;
-    latencies_table[stream_id]->ack_timestamp = now;
-    latencies_table[stream_id]->acked = true;
+    if (latencies_table.find(stream_id) != latencies_table.end()) {
+      collect_statistics = true;
+    }
+    if (collect_statistics) {
+      latencies_table[stream_id]->ack_timestamp = now;
+      latencies_table[stream_id]->acked = true;
+    }
     if (acks.load() != (req_id + 1)) {
       // std::cerr << __PRETTY_FUNCTION__ << " problem\n";
       // exit(-1);
     }
-
-    if (latencies_table[stream_id]->req_id != req_id) {
-      std::cerr << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
-                << " request ids do not match "
-                << latencies_table[stream_id]->req_id << " " << req_id << "\n";
-      exit(-1);
+    if (collect_statistics) {
+      if (latencies_table[stream_id]->req_id != req_id) {
+        std::cerr << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+                  << " request ids do not match "
+                  << latencies_table[stream_id]->req_id << " " << req_id
+                  << "\n";
+        exit(-1);
+      }
+      if (latencies_table[stream_id]->tx_timestamp != timestamp) {
+        std::cerr << __PRETTY_FUNCTION__ << " timestamps do not match: "
+                  << latencies_table[stream_id]->tx_timestamp << " "
+                  << timestamp << "\n";
+        exit(-1);
+      }
     }
-    if (latencies_table[stream_id]->tx_timestamp != timestamp) {
-      std::cerr << __PRETTY_FUNCTION__ << " timestamps do not match: "
-                << latencies_table[stream_id]->tx_timestamp << " " << timestamp
+#if 1
+    if (collect_statistics) {
+      std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+                << ", data_sz=" << server_reply.size() << ", req_id=" << req_id
+                << ", timestamp=" << timestamp << "ns, latency=" << latency
+                << " ns (" << latency / 1e6 << "ms)"
+                << " zil_blk_id=" << zil_blk_id << ", poolname=" << poolname
                 << "\n";
-      exit(-1);
     }
-#if 0
-    std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
-              << ", data_sz=" << server_reply.size() << ", req_id=" << req_id
-              << ", timestamp=" << timestamp << "ns, latency=" << latency
-              << " ns," << " zil_blk_id=" << zil_blk_id
-              << ", poolname=" << poolname << "\n";
 #endif
     // todo: notify the kernel about the acked commitment
     memset(&dest_addr, 0, sizeof(dest_addr));
@@ -2448,8 +2461,10 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     free(tx_msg);
     std::vector<recv_cmt_msg_t *> to_be_deleted =
       recv_queue.pop_until_blk_id(zil_blk_id);
+#if 0
     printf("%s: delete %ld entries from the queue with last_blk_id=%ld\n",
            __func__, to_be_deleted.size(), zil_blk_id);
+#endif
     for (auto &buf : to_be_deleted) {
       free(buf); // free the messages that were popped from the queue
     }
@@ -3436,6 +3451,7 @@ static void thread_func_get_cmt() {
     expected_blk_id++;
 
     send(socket_fd, "Hello from cmt thread", 22, 0);
+    std::this_thread::sleep_for(std::chrono::microseconds(5));
     // std::cout << "Sent message from cmt thread" << std::endl;
     // std::this_thread::sleep_for(std::chrono::seconds(5));
   }
@@ -4112,7 +4128,7 @@ int main(int argc, char **argv) {
   std::cout << latencies_table << "\n";
   auto [avg_lat, std_lat] = compute_avg_latency(latencies_table);
   std::cout << "avg_lat = " << avg_lat << " std_lat=" << std_lat << " over "
-            << latencies_table.size() << " reqs\n";
+            << latencies_table.size() << " 10K reqs\n";
   get_cmt_thread.join();
   return EXIT_SUCCESS;
 }
