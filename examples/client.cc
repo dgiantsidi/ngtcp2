@@ -212,8 +212,10 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
     std::cout << "##### Received notification: " << std::string(buffer, n)
               << " count=" << count << "\n";
 #endif
-    writecb(loop, w, revents);
-    count++;
+    if (recv_queue.has_elems_to_be_processed()) {
+      writecb(loop, w, revents);
+      count++;
+    }
   }
 }
 
@@ -2185,12 +2187,14 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
   auto ts = util::timestamp();
   recv_cmt_msg_t *last_cmt = recv_queue.pop();
   if (last_cmt == nullptr) {
-#if 0
+#if 1
     std::cerr << __PRETTY_FUNCTION__ << " last_cmt is nullptr\n";
+    assert(false);
 #endif
     last_cmt = (recv_cmt_msg_t *)malloc(sizeof(recv_cmt_msg_t));
     last_cmt->blk_id = 0;
   }
+
 #if 0
   std::cout << __PRETTY_FUNCTION__ << " : " << ts
             << " ns, to send cmt about blk_id=" << last_cmt->blk_id
@@ -2444,8 +2448,8 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     free(tx_msg);
     std::vector<recv_cmt_msg_t *> to_be_deleted =
       recv_queue.pop_until_blk_id(zil_blk_id);
-    // printf("delete about %d entries from the queue with last_blk_id=%ld\n",
-    // to_be_deleted.size(), last_blk_id);
+    printf("%s: delete %ld entries from the queue with last_blk_id=%ld\n",
+           __func__, to_be_deleted.size(), zil_blk_id);
     for (auto &buf : to_be_deleted) {
       free(buf); // free the messages that were popped from the queue
     }
@@ -2852,7 +2856,8 @@ int run(Client &c, const char *addr, const char *port,
   }
 
 #ifdef HAVE_LINUX_RTNETLINK_H
-  std::cout << "Using RTNETLINK to get local address" << std::endl;
+  std::cout << __func__ << ": Using RTNETLINK to get local address"
+            << std::endl;
   in_addr_union iau;
 
   if (get_local_addr(iau, remote_addr) != 0) {
@@ -2866,7 +2871,8 @@ int run(Client &c, const char *addr, const char *port,
     return -1;
   }
 #else // !defined(HAVE_LINUX_RTNETLINK_H)
-  std::cout << "Using getaddrinfo to get local address" << std::endl;
+  std::cout << __func__ << ": Using getaddrinfo to get local address"
+            << std::endl;
   if (connect_sock(local_addr, fd, remote_addr) != 0) {
     std::cerr << "Could not connect to remote address" << std::endl;
     close(fd);
@@ -2875,22 +2881,25 @@ int run(Client &c, const char *addr, const char *port,
 
 #endif // !defined(HAVE_LINUX_RTNETLINK_H)
 
-  // #### create connection with local socket ####
-  auto notification_fd =
+  // create connection with local socket
+  auto socket_fd =
     socket(AF_INET, SOCK_STREAM, 0); // TCP socket; streaming (do we need upd?)
-  if (notification_fd == -1) {
-    std::cout << "Could not create notification socket" << std::endl;
+  if (socket_fd == -1) {
+    std::cout << __func__
+              << ": Could not create socket for getting the notifications .."
+              << std::endl;
     return -1;
   }
 
-  int server_fd = notification_fd;
+  int server_port = 7000;
+  int server_fd = socket_fd;
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY; // Listen on all interfaces
-  server_addr.sin_port = htons(7000);       // Port number
+  server_addr.sin_addr.s_addr = INADDR_ANY;  // Listen on all interfaces
+  server_addr.sin_port = htons(server_port); // Port number
 
   if (bind(server_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror(".bind");
+    perror("bind");
     close(server_fd);
     return 1;
   }
@@ -2901,7 +2910,8 @@ int run(Client &c, const char *addr, const char *port,
     return 1;
   }
 
-  std::cout << "Server listening on port 7000..." << std::endl;
+  std::cout << __func__ << ": Listening on port " << server_port
+            << " for incomming notifications about cmts ..." << std::endl;
 
   sockaddr_in client_addr{};
   socklen_t client_len = sizeof(client_addr);
@@ -2912,7 +2922,6 @@ int run(Client &c, const char *addr, const char *port,
     return 1;
   }
 
-#if 1
   // Set the socket to non-blocking mode
   int flags = fcntl(client_fd, F_GETFL, 0);
   if (flags == -1) {
@@ -2926,15 +2935,16 @@ int run(Client &c, const char *addr, const char *port,
     close(client_fd);
     return 1;
   }
-#endif
-  std::cout << "Client connected!" << std::endl;
+
+  std::cout << __func__ << ": The thread that fetches cmts has connected!"
+            << std::endl;
 
   if (c.init(fd, local_addr, remote_addr, addr, port, tls_ctx) != 0) {
     return -1;
   }
 
   if (c.init_local(client_fd, thread_local_address, thread_remote_address,
-                   "localhost", "7000") != 0) {
+                   "localhost", std::to_string(server_port).c_str()) != 0) {
     return -1;
   }
 
@@ -3004,7 +3014,7 @@ namespace {
 int parse_requests(char **argv, size_t argvlen) {
   auto uri = argv[0];
   // for (size_t i = 0; i < argvlen; ++i)
-  for (size_t i = 0; i < 12; ++i) {
+  for (size_t i = 0; i < 1; ++i) {
     Request req;
     if (parse_uri(req, uri) != 0) {
       std::cerr << "Could not parse URI: " << uri << std::endl;
@@ -3287,48 +3297,51 @@ Options:
 
 static void thread_func_get_cmt() {
   std::this_thread::sleep_for(std::chrono::seconds(5));
-  const char *arg_poolname = "test_pool"; // Example pool name
+  char arg_poolname[ZFS_MAX_DATASET_NAME_LEN] =
+    "test_pool"; // Example pool name
   // create socket and connect to other thread
-  std::cout << "Thread started" << std::endl;
+  std::cout << __func__ << ": Thread started for pool=" << arg_poolname
+            << std::endl;
 
-  int sockfd = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
-  if (sockfd < 0) {
+  int socket_fd = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+  if (socket_fd < 0) {
     perror("socket");
     return;
   }
 
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(7000); // Port number
+  server_addr.sin_port = htons(7000); // port number
 
   // convert IP address from text to binary
   if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
-    perror(".inet_pton");
-    close(sockfd);
+    perror("error in inet_pton");
+    close(socket_fd);
     return;
   }
 
   // connect to the server
-  if (connect(sockfd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+  if (connect(socket_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
     perror("error in connecting to server");
-    close(sockfd);
+    close(socket_fd);
     return;
   }
   // Set the socket to non-blocking mode
-  int flags = fcntl(sockfd, F_GETFL, 0);
+  int flags = fcntl(socket_fd, F_GETFL, 0);
   if (flags == -1) {
     perror("fcntl(F_GETFL)");
-    close(sockfd);
+    close(socket_fd);
     return;
   }
 
-  if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+  if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
     perror("fcntl(F_SETFL)");
-    close(sockfd);
+    close(socket_fd);
     return;
   }
 
-  std::cout << "Connected to server!" << std::endl;
+  std::cout << __func__ << ": Thread has connected to the notifications thread!"
+            << std::endl;
   const char *poolname = (const char *)arg_poolname;
   static uint64_t expected_blk_id = 0; // static to retain value between calls
   struct sockaddr_nl src_addr, dest_addr;
@@ -3349,7 +3362,6 @@ static void thread_func_get_cmt() {
   src_addr.nl_groups = 0;     /* not in mcast groups */
   bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr));
 
-  std::cout << "Connected to cmt" << std::endl;
   for (;;) {
     struct timespec start, end;
 
@@ -3423,7 +3435,7 @@ static void thread_func_get_cmt() {
     free(nlh);
     expected_blk_id++;
 
-    send(sockfd, "Hello from cmt thread", 22, 0);
+    send(socket_fd, "Hello from cmt thread", 22, 0);
     // std::cout << "Sent message from cmt thread" << std::endl;
     // std::this_thread::sleep_for(std::chrono::seconds(5));
   }
