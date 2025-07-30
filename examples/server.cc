@@ -1186,9 +1186,7 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
                     void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
-  // std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen
-  // <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
-
+  
   if (h->http_end_stream(stream) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }
@@ -1200,7 +1198,11 @@ int Handler::http_end_stream(Stream *stream) {
   // TODO: HERE PROCESS the stream->dev
   // std::cout << __PRETTY_FUNCTION__ << " stream->datalen=" << stream->datalen
   // <<  " stream->data_vec.size()=" << stream->data_vec.size() << "\n";
-  char buf[7];
+  if (stream->data_vec.empty()) {
+    std::cout << "No data received on stream " << stream->stream_id
+              << ", returning early response\n";
+    return 0;
+  }
   std::unique_ptr<quic_message> msg_ptr = quic_message::deserialize_me(
     stream->data_vec.data(), stream->data_vec.size());
   quic_message::print_quick_message(msg_ptr.get());
