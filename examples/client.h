@@ -58,11 +58,8 @@ struct Stream {
 
   ~Stream();
 
-  int open_file(const std::string_view &path);
-
   Request req;
   int64_t stream_id;
-  int fd;
   std::string stream_data;
 };
 
@@ -86,7 +83,7 @@ public:
   int init_local(int fd, const Address &local_addr, const Address &remote_addr,
                  const char *addr, const char *port);
   void disconnect();
-
+  
   int on_read(const Endpoint &ep);
   int on_write();
   int write_streams();
@@ -132,6 +129,7 @@ public:
   int acked_stream_data_offset(int64_t stream_id, uint64_t datalen);
   void http_consume(int64_t stream_id, size_t nconsumed);
   void http_write_data(int64_t stream_id, Span<const uint8_t> data);
+  void send_stream_reply(int64_t stream_id);
   int on_stream_reset(int64_t stream_id);
   int on_stream_stop_sending(int64_t stream_id);
   int extend_max_stream_data(int64_t stream_id, uint64_t max_data);

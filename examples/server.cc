@@ -331,7 +331,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         void *stream_user_data) {
   auto stream = static_cast<Stream *>(stream_user_data);
 
-  // std::cout << __PRETTY_FUNCTION__ << "\n";
+  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id <<"\n";
   vec[0].base = stream->data;
   // auto ts = util::timestamp();
   // ::memcpy(stream->data, )
