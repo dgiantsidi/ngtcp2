@@ -95,7 +95,7 @@ constexpr size_t k_msg_size =
 // do not modify the value of k_magic_number
 constexpr int k_magic_number = 5;
 constexpr int server_port = 7000;
-constexpr int statistics_rate = 10000; // every 10K requests
+constexpr int statistics_rate = 1; // every 10K requests
 
 std::map<int, std::unique_ptr<statistics>> latencies_table;
 static std::atomic<uint64_t> global_req_id{0};
@@ -224,7 +224,7 @@ void writecb(struct ev_loop *loop, ev_io *w, int revents) {
 namespace {
 void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
   static int count = 0;
-
+  std::cout << getpid() << ": " << __PRETTY_FUNCTION__ << "\n";
   if (revents & EV_READ) {
     char buffer[1024];
     size_t n = read(w->fd, buffer, 22);
@@ -237,14 +237,13 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
       // std::cout << "No more notifications." << std::endl;
       return;
     }
-#ifdef PRINT_DEBUG
-    std::cout << "##### Received notification: " << std::string(buffer, n)
-              << " count=" << count << "\n";
+#ifndef PRINT_DEBUG
+    std::cout << __func__ << ": count=" << count << "\n";
+    count++;
 #endif
-    if (recv_queue.has_elems_to_be_processed()) {
+    
       writecb(loop, w, revents);
       count++;
-    }
   }
 }
 
@@ -615,6 +614,12 @@ int stream_stop_sending(ngtcp2_conn *conn, int64_t stream_id,
 namespace {
 int extend_max_local_streams_bidi(ngtcp2_conn *conn, uint64_t max_streams,
                                   void *user_data) {
+   auto c = static_cast<Client *>(user_data);
+
+  if (c->on_extend_max_streams() != 0) {
+    return NGTCP2_ERR_CALLBACK_FAILURE;
+  }
+
   return 0;
 }
 } // namespace
@@ -1149,6 +1154,7 @@ int Client::on_read(const Endpoint &ep) {
         }
       } else if (feed_data(ep, &su.sa, msg.msg_namelen, &pi,
                            {data.data(), datalen}) != 0) {
+        std::cerr << "feed_data failed" << std::endl;
         return -1;
       }
 
@@ -1168,6 +1174,7 @@ int Client::on_read(const Endpoint &ep) {
     ngtcp2_ccerr_set_application_error(
       &last_error_, nghttp3_err_infer_quic_app_error_code(0), nullptr, 0);
     disconnect();
+    std::cerr << "Exiting because all streams are closed" << std::endl;
     return -1;
   }
 
@@ -2088,11 +2095,11 @@ int Client::on_extend_max_streams() {
               << " delay_stream is active or handshake not confirmed\n";
     return 0;
   }
-#if 0
+#if 1
   std::cout << __PRETTY_FUNCTION__ << " nstreams_done_=" << nstreams_done_
             << " config.nstreams=" << config.nstreams << "\n";
 #endif
-  if (nstreams_done_ < 10000000) { // todo: I fetch the commitments here
+  if (recv_queue.has_elems_to_be_processed()) {
 
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
@@ -2104,7 +2111,6 @@ int Client::on_extend_max_streams() {
 
     auto stream = std::make_unique<Stream>(
       config.requests[nstreams_done_ % config.requests.size()], stream_id);
-
     if (submit_http_request(stream.get()) != 0) {
       std::cerr << __PRETTY_FUNCTION__ << ": submit_http_request\n";
       return 0;
@@ -2148,7 +2154,7 @@ serialize_last_cmt_into_char(recv_cmt_msg_t *cmt) {
 nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         size_t veccnt, uint32_t *pflags, void *user_data,
                         void *stream_user_data) {
-  // std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id << "\n";
+  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id << "\n";
   auto ts = util::timestamp();
   recv_cmt_msg_t *last_cmt = recv_queue.pop();
   if (last_cmt == nullptr) {
@@ -2160,7 +2166,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
     last_cmt->blk_id = 0;
   }
 
-#if 0
+#if 1
   std::cout << __PRETTY_FUNCTION__ << " : " << ts
             << " ns, to send cmt about blk_id=" << last_cmt->blk_id
             << " config.datalen=" << config.datalen << "\n";
@@ -2247,6 +2253,9 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
   auto nconsumed =
     nghttp3_conn_read_stream(httpconn_, stream_id, data.data(), data.size(),
                              flags & NGTCP2_STREAM_DATA_FLAG_FIN);
+  std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
+            << " nconsumed=" << nconsumed << " data.size()=" << data.size()
+            << " flags=0x" << std::hex << flags << std::dec << "\n";
   if (nconsumed < 0) {
     std::cerr << "nghttp3_conn_read_stream: " << nghttp3_strerror(nconsumed)
               << std::endl;
@@ -2518,7 +2527,7 @@ void Client::http_write_data(int64_t stream_id, Span<const uint8_t> data) {
   }
 
   auto &stream = (*it).second;
-#if 0
+#if 1
   std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
             << " data.size()=" << data.size() << "\n";
 #endif
@@ -2697,7 +2706,7 @@ void Client::send_stream_reply(int64_t stream_id) {
 
     uint64_t blk_id = 0;
     memcpy(&blk_id, tx_msg, sizeof(uint64_t));
-#ifdef PRINT
+#ifndef PRINT
     printf("%s send to kernel: {%ld, %dB}\n", __func__, zil_blk_id,
            nlh->nlmsg_len);
 #endif
@@ -3156,7 +3165,7 @@ void config_set_default(Config &config) {
   config.max_data = 24_m;
   config.max_stream_data_bidi_local = 16_m;
   config.max_stream_data_uni = 16_m;
-  config.max_streams_uni = 4; // 100;
+  config.max_streams_uni = 100; // 100;
   config.cc_algo = NGTCP2_CC_ALGO_CUBIC;
   config.initial_rtt = NGTCP2_DEFAULT_INITIAL_RTT;
   config.handshake_timeout = UINT64_MAX;
@@ -3534,7 +3543,7 @@ static void thread_func_get_cmt() {
              recv_msg->blk_id, expected_blk_id);
       // exit(0);
     }
-#ifdef PRINT
+#ifndef PRINT
     printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
            recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
 #endif
@@ -3546,7 +3555,7 @@ static void thread_func_get_cmt() {
 
     send(socket_fd, "Hello from cmt thread", 22, 0);
     // std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
-    //std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
+    // std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
     if (idx >= n_samples) {
       idx = 0; // reset index to loop through the distribution
     }
