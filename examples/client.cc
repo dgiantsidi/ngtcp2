@@ -81,7 +81,7 @@ struct statistics {
   uint64_t ack_timestamp = 0;
   friend std::ostream &operator<<(std::ostream &os, const statistics &stats) {
     os << stats.req_id << ":(stream_id=" << stats.stream_id << ") " << std::dec
-       << stats.tx_timestamp << ", " << std::dec << stats.ack_timestamp
+       << "tx_timestamp=" << stats.tx_timestamp << ", ack_timestamp=" << std::dec << stats.ack_timestamp
        << ", computed latency= " << (stats.ack_timestamp - stats.tx_timestamp)
        << "ns, " << (stats.ack_timestamp - stats.tx_timestamp) / 1000000.0
        << " ms)";
@@ -95,6 +95,7 @@ constexpr size_t k_msg_size =
 // do not modify the value of k_magic_number
 constexpr int k_magic_number = 5;
 constexpr int server_port = 7000;
+constexpr int statistics_rate = 10000; // every 10K requests
 
 std::map<int, std::unique_ptr<statistics>> latencies_table;
 static std::atomic<uint64_t> global_req_id{0};
@@ -107,49 +108,45 @@ static size_t max_buffer_size() {
 }
 
 
-#if 0
- // Uniform distribution
-    std::uniform_real_distribution<> uniform(min_us, max_us);
 
-int get_interval_on_exponential() {
 
-}
+using exp_distribution = std::vector<int>;
+using uni_distribution = std::vector<int>;
+using normal_distribution = std::vector<int>;
 
-int get_interval_on_uniform() {
-    const int n_samples = 1000;
-    const double min_us = 2.0;       // 2 microseconds
-    const double max_us = 10000.0;   // 10 milliseconds = 10,000 microseconds
-
+std::tuple<exp_distribution, uni_distribution, normal_distribution> 
+  construct_distribution(const int min_us, const int max_us, const int n_samples) {
     std::random_device rd;
     std::mt19937 gen(rd());
+    
+    // exponential distribution (mean scaled to half the range)
+    int exp_mean = (max_us - min_us) / 2;
+    std::exponential_distribution<> exponential(1 / exp_mean);
 
-   
-
-    // Exponential distribution (mean scaled to half the range)
-    double exp_mean = (max_us - min_us) / 2.0;
-    std::exponential_distribution<> exponential(1.0 / exp_mean);
-
-    // Normal distribution (truncated to [min_us, max_us])
-    double normal_mean = (min_us + max_us) / 2.0;
-    double normal_stddev = (max_us - min_us) / 4.0;
+    // uniform distribution
+    std::uniform_real_distribution<> uniform(min_us, max_us);
+    
+    // normal distribution (truncated to [min_us, max_us])
+    int normal_mean = (min_us + max_us) / 2;
+    int normal_stddev = (max_us - min_us) / 4;
     std::normal_distribution<> normal(normal_mean, normal_stddev);
 
-    std::vector<double> uniform_samples, exp_samples, normal_samples;
+    std::vector<int> uniform_samples, exp_samples, normal_samples;
 
     for (int i = 0; i < n_samples; ++i) {
         uniform_samples.push_back(uniform(gen));
 
-        double e = exponential(gen) + min_us;
+        int e = exponential(gen) + min_us;
         exp_samples.push_back(std::min(e, max_us));
 
-        double n;
+        int n;
         do {
             n = normal(gen);
         } while (n < min_us || n > max_us);
         normal_samples.push_back(n);
     }
 
-    // Print a few samples
+    // print a few samples
     std::cout << "Uniform: ";
     for (int i = 0; i < 5; ++i) std::cout << uniform_samples[i] << " ";
     std::cout << "\nExponential: ";
@@ -157,10 +154,9 @@ int get_interval_on_uniform() {
     std::cout << "\nTruncated Normal: ";
     for (int i = 0; i < 5; ++i) std::cout << normal_samples[i] << " ";
     std::cout << std::endl;
-
-    return 0;
+    return {exp_samples, uniform_samples, normal_samples};
 }
-#endif
+
 
 static std::tuple<double, double>
 compute_avg_latency(const std::map<int, std::unique_ptr<statistics>> &m) {
@@ -2192,7 +2188,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 #endif
 
   vec[0].base = config.data;
-  if (global_req_id.load() % 10000 == 0) {
+  if (global_req_id.load() % statistics_rate == 0) {
     latencies_table.insert(
       std::make_pair(stream_id, std::make_unique<statistics>()));
     latencies_table[stream_id]->tx_timestamp = ts;
@@ -2493,6 +2489,7 @@ int http_recv_data(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
   c->http_consume(stream_id, datalen);
 
   c->http_write_data(stream_id, {data, datalen});
+
   return 0;
 }
 } // namespace
@@ -2528,8 +2525,6 @@ void Client::http_write_data(int64_t stream_id, Span<const uint8_t> data) {
 
   stream->stream_data.append(reinterpret_cast<const char *>(data.data()),
                              data.size());
-  // todo: @dimitra: you could consume the data here
-
 #if 0
   if (stream->fd == -1) {
     return;
@@ -2583,7 +2578,17 @@ int http_begin_trailers(nghttp3_conn *conn, int64_t stream_id, void *user_data,
   }
   return 0;
 }
+
+int http_end_stream(nghttp3_conn *conn, int64_t stream_id,
+                             void *user_data, void *stream_user_data) {
+ 
+  auto c = static_cast<Client *>(user_data);
+  c->send_stream_reply(stream_id);
+  return 0;
+}
+
 } // namespace
+
 
 void Client::send_stream_reply(int64_t stream_id) {
   auto it = streams_.find(stream_id);
@@ -2600,7 +2605,7 @@ void Client::send_stream_reply(int64_t stream_id) {
   if (acks.load() % 100000 == 0)
     std::cout << "acks no=" << acks.load() << "\n";
   if (stream->stream_data.size() != k_msg_size) {
-#if 1
+#if 0
     std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
               << " server reply size mismatch: " << stream->stream_data.size()
               << " != " << k_msg_size << " (expected)" << "\n";
@@ -2655,7 +2660,8 @@ void Client::send_stream_reply(int64_t stream_id) {
     if (collect_statistics) {
       std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
                 << ", data_sz=" << server_reply.size() << ", req_id=" << req_id
-                << ", timestamp=" << timestamp << "ns, latency=" << latency
+                << ", tx_timestamp=" << latencies_table[stream_id]->tx_timestamp << "ns," << " ack_timestamp=" << latencies_table[stream_id]->ack_timestamp 
+                <<  "ns, latency=" << latency 
                 << " ns (" << latency / 1e6 << "ms)"
                 << " zil_blk_id=" << zil_blk_id << ", poolname=" << poolname
                 << "\n";
@@ -2723,7 +2729,8 @@ int http_recv_trailer(nghttp3_conn *conn, int64_t stream_id, int32_t token,
   if (!config.quiet) {
     debug::print_http_header(stream_id, name, value, flags);
   }
-  
+ 
+
   return 0;
 }
 } // namespace
@@ -2790,7 +2797,7 @@ int http_stream_close(nghttp3_conn *conn, int64_t stream_id,
                       uint64_t app_error_code, void *conn_user_data,
                       void *stream_user_data) {
   auto c = static_cast<Client *>(conn_user_data);
-  c->send_stream_reply(stream_id);
+  //c->send_stream_reply(stream_id);
   if (c->http_stream_close(stream_id, app_error_code) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }
@@ -2853,7 +2860,7 @@ int Client::setup_httpconn() {
     ::http_recv_trailer,
     ::http_end_trailers,
     ::http_stop_sending,
-    nullptr, // end_stream
+    ::http_end_stream, // end_stream
     ::http_reset_stream,
     nullptr, // shutdown
     ::http_recv_settings,
@@ -3389,6 +3396,11 @@ Options:
 } // namespace
 
 static void thread_func_get_cmt() {
+  const int n_samples = 1000;
+  const int min_us = 2;       // 2 microseconds
+  const int max_us = 10000;   // 10 milliseconds = 10,000 microseconds
+  int idx = 0;
+  auto [exp_dist, uni_dist, normal_dist] = construct_distribution(min_us, max_us, n_samples);
   std::this_thread::sleep_for(std::chrono::seconds(5));
   char arg_poolname[ZFS_MAX_DATASET_NAME_LEN] =
     "test_pool"; // example pool name
@@ -3533,7 +3545,13 @@ static void thread_func_get_cmt() {
     expected_blk_id++;
 
     send(socket_fd, "Hello from cmt thread", 22, 0);
-    std::this_thread::sleep_for(std::chrono::microseconds(5));
+    // std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
+    //std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
+    if (idx >= n_samples) {
+      idx = 0; // reset index to loop through the distribution
+    }
+    else 
+      idx++;
   }
 }
 
@@ -3542,6 +3560,7 @@ int main(int argc, char **argv) {
   char *data_path = nullptr;
   const char *private_key_file = nullptr;
   const char *cert_file = nullptr;
+  
 
   std::thread get_cmt_thread = std::thread(thread_func_get_cmt);
 
