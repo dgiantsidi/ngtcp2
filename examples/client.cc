@@ -95,7 +95,7 @@ constexpr size_t k_msg_size =
 // do not modify the value of k_magic_number
 constexpr int k_magic_number = 5;
 constexpr int server_port = 7000;
-constexpr int statistics_rate = 1; // every 10K requests
+constexpr int statistics_rate = 100; // every 10K requests
 
 std::map<int, std::unique_ptr<statistics>> latencies_table;
 static std::atomic<uint64_t> global_req_id{0};
@@ -2546,6 +2546,7 @@ void Client::http_write_data(int64_t stream_id, Span<const uint8_t> data) {
 
   stream->stream_data.append(reinterpret_cast<const char *>(data.data()),
                              data.size());
+  send_stream_reply(stream_id);
 #if 0
   if (stream->fd == -1) {
     return;
@@ -2604,7 +2605,7 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id,
                              void *user_data, void *stream_user_data) {
  
   auto c = static_cast<Client *>(user_data);
-  c->send_stream_reply(stream_id);
+ 
   return 0;
 }
 
