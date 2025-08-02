@@ -99,6 +99,7 @@ constexpr int statistics_rate = 1; // every 10K requests
 
 std::map<int, std::unique_ptr<statistics>> latencies_table;
 static std::atomic<uint64_t> global_req_id{0};
+static std::atomic<bool> ready{false};
 fifo_queue<recv_cmt_msg_t *> recv_queue;
 
 static size_t max_buffer_size() {
@@ -242,8 +243,7 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
     count++;
 #endif
     
-      writecb(loop, w, revents);
-      count++;
+    writecb(loop, w, revents);
   }
 }
 
@@ -504,7 +504,6 @@ int Client::handshake_completed() {
                 << std::endl;
     }
   }
-
   return 0;
 }
 
@@ -1199,17 +1198,23 @@ int Client::handle_expiry() {
 int Client::on_write() {
   if (tx_.send_blocked) {
     if (auto rv = send_blocked_packet(); rv != 0) {
+      std::cout << __PRETTY_FUNCTION__ << ": send_blocked_packet failed: "
+                << rv << std::endl;
       return rv;
     }
 
     if (tx_.send_blocked) {
+      std::cout << __PRETTY_FUNCTION__
+                << ": Still send_blocked after send_blocked_packet" << std::endl;
       return 0;
     }
   }
 
-  ev_io_stop(loop_, &wev_);
+  //ev_io_stop(loop_, &wev_);
 
   if (auto rv = write_streams(); rv != 0) {
+    std::cout << __PRETTY_FUNCTION__ << ": write_streams failed: " << rv
+              << std::endl;
     return rv;
   }
 
@@ -1217,11 +1222,14 @@ int Client::on_write() {
     ngtcp2_ccerr_set_application_error(
       &last_error_, nghttp3_err_infer_quic_app_error_code(0), nullptr, 0);
     disconnect();
+    std::cout << __PRETTY_FUNCTION__ << ": Exiting because all streams are closed"
+              << std::endl;
     return -1;
   }
 
   update_timer();
   on_extend_max_streams();
+  write_streams();
   return 0;
 }
 
@@ -2100,7 +2108,6 @@ int Client::on_extend_max_streams() {
             << " config.nstreams=" << config.nstreams << "\n";
 #endif
   if (recv_queue.has_elems_to_be_processed()) {
-
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
       assert(NGTCP2_ERR_STREAM_ID_BLOCKED == rv);
@@ -2117,6 +2124,9 @@ int Client::on_extend_max_streams() {
     }
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
+    std::cout << __PRETTY_FUNCTION__ << " opened stream_id=" << stream_id
+              << " nstreams_done_=" << nstreams_done_
+              << " config.nstreams=" << config.nstreams << "\n";
   } else {
     std::cout << __PRETTY_FUNCTION__ << " nstreams_done_=" << nstreams_done_
               << " config.nstreams=" << config.nstreams
@@ -2243,7 +2253,9 @@ int Client::submit_http_request(const Stream *stream) {
               << std::endl;
     return -1;
   }
-
+  std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream->stream_id
+            << " nva.size()=" << nva.size() << " config.datalen="
+            << config.datalen << " count=" << count << "\n";
   return 0;
 }
 
@@ -3061,7 +3073,7 @@ int run(Client &c, const char *addr, const char *port,
   if (auto rv = c.on_write(); rv != 0) {
     return rv;
   }
-
+  ready.store(true);
   ev_run(EV_DEFAULT, 0);
 
   return 0;
@@ -3411,6 +3423,7 @@ static void thread_func_get_cmt() {
   int idx = 0;
   auto [exp_dist, uni_dist, normal_dist] = construct_distribution(min_us, max_us, n_samples);
   std::this_thread::sleep_for(std::chrono::seconds(5));
+ 
   char arg_poolname[ZFS_MAX_DATASET_NAME_LEN] =
     "test_pool"; // example pool name
   // create socket and connect to other thread
@@ -3480,7 +3493,9 @@ static void thread_func_get_cmt() {
   src_addr.nl_pid = getpid(); /* self pid */
   src_addr.nl_groups = 0;     /* not in mcast groups */
   bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr));
-
+  while (ready.load() == false) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
   for (;;) {
     struct timespec start, end;
 
@@ -3538,9 +3553,11 @@ static void thread_func_get_cmt() {
     recv_cmt_msg_t *recv_msg =
       deserialize_recv_cmt(reinterpret_cast<char *>(NLMSG_DATA(nlh)));
     if (expected_blk_id != recv_msg->blk_id) {
+      #if 0
       printf("received unexpected blk_id=%ld, expected=%ld, just reload the "
              "kernel-module ..\n",
              recv_msg->blk_id, expected_blk_id);
+      #endif
       // exit(0);
     }
 #ifndef PRINT
@@ -3555,7 +3572,7 @@ static void thread_func_get_cmt() {
 
     send(socket_fd, "Hello from cmt thread", 22, 0);
     // std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
-    // std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
+    //std::this_thread::sleep_for(std::chrono::microseconds(1000000));
     if (idx >= n_samples) {
       idx = 0; // reset index to loop through the distribution
     }
