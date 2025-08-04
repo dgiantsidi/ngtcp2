@@ -3596,8 +3596,8 @@ int main(int argc, char **argv) {
   char *data_path = nullptr;
   const char *private_key_file = nullptr;
   const char *cert_file = nullptr;
-
-  std::thread get_cmt_thread = std::thread(thread_func_get_cmt, argv[1]);
+  std::thread get_cmt_thread;
+  
 
   if (argc) {
     prog = basename(argv[0]);
@@ -3658,6 +3658,7 @@ int main(int argc, char **argv) {
       {"wait-for-ticket", no_argument, &flag, 41},
       {"initial-pkt-num", required_argument, &flag, 42},
       {"pmtud-probes", required_argument, &flag, 43},
+      {"poolname", required_argument, &flag, 44},
       {nullptr, 0, nullptr, 0},
     };
 
@@ -4104,6 +4105,14 @@ int main(int argc, char **argv) {
         break;
       }
       }
+      case 44:
+        // --poolname
+        if (strlen(optarg) >= ZFS_MAX_DATASET_NAME_LEN) {
+          std::cerr << "poolname: too long" << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        
+        get_cmt_thread = std::thread(thread_func_get_cmt, optarg);
       break;
     default:
       break;
