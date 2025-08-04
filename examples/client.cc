@@ -2130,7 +2130,7 @@ int Client::on_extend_max_streams() {
               << " config.nstreams=" << config.nstreams << "\n";
 #endif
   } else {
-    std::cout << __PRETTY_FUNCTION__ << " nstreams_done_=" << nstreams_done_
+    std::cout << __PRETTY_FUNCTION__ << "stream_id=" << stream_id << ", nstreams_done_=" << nstreams_done_
               << " config.nstreams=" << config.nstreams
               << " no more streams to open\n";
   }
