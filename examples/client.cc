@@ -54,13 +54,11 @@
 #include "shared.h"
 #include "message_format.h"
 
-
 #include <iostream>
 #include <random>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-
 
 #include <linux/netlink.h>
 #include <sys/socket.h>
@@ -81,7 +79,8 @@ struct statistics {
   uint64_t ack_timestamp = 0;
   friend std::ostream &operator<<(std::ostream &os, const statistics &stats) {
     os << stats.req_id << ":(stream_id=" << stats.stream_id << ") " << std::dec
-       << "tx_timestamp=" << stats.tx_timestamp << ", ack_timestamp=" << std::dec << stats.ack_timestamp
+       << "tx_timestamp=" << stats.tx_timestamp
+       << ", ack_timestamp=" << std::dec << stats.ack_timestamp
        << ", computed latency= " << (stats.ack_timestamp - stats.tx_timestamp)
        << "ns, " << (stats.ack_timestamp - stats.tx_timestamp) / 1000000.0
        << " ms)";
@@ -108,56 +107,56 @@ static size_t max_buffer_size() {
            : sizeof(recv_cmt_msg_t);
 }
 
-
-
-
 using exp_distribution = std::vector<int>;
 using uni_distribution = std::vector<int>;
 using normal_distribution = std::vector<int>;
 
-std::tuple<exp_distribution, uni_distribution, normal_distribution> 
-  construct_distribution(const int min_us, const int max_us, const int n_samples) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    
-    // exponential distribution (mean scaled to half the range)
-    int exp_mean = (max_us - min_us) / 2;
-    std::exponential_distribution<> exponential(1 / exp_mean);
+std::tuple<exp_distribution, uni_distribution, normal_distribution>
+construct_distribution(const int min_us, const int max_us,
+                       const int n_samples) {
+  std::random_device rd;
+  std::mt19937 gen(rd());
 
-    // uniform distribution
-    std::uniform_real_distribution<> uniform(min_us, max_us);
-    
-    // normal distribution (truncated to [min_us, max_us])
-    int normal_mean = (min_us + max_us) / 2;
-    int normal_stddev = (max_us - min_us) / 4;
-    std::normal_distribution<> normal(normal_mean, normal_stddev);
+  // exponential distribution (mean scaled to half the range)
+  int exp_mean = (max_us - min_us) / 2;
+  std::exponential_distribution<> exponential(1 / exp_mean);
 
-    std::vector<int> uniform_samples, exp_samples, normal_samples;
+  // uniform distribution
+  std::uniform_real_distribution<> uniform(min_us, max_us);
 
-    for (int i = 0; i < n_samples; ++i) {
-        uniform_samples.push_back(uniform(gen));
+  // normal distribution (truncated to [min_us, max_us])
+  int normal_mean = (min_us + max_us) / 2;
+  int normal_stddev = (max_us - min_us) / 4;
+  std::normal_distribution<> normal(normal_mean, normal_stddev);
 
-        int e = exponential(gen) + min_us;
-        exp_samples.push_back(std::min(e, max_us));
+  std::vector<int> uniform_samples, exp_samples, normal_samples;
 
-        int n;
-        do {
-            n = normal(gen);
-        } while (n < min_us || n > max_us);
-        normal_samples.push_back(n);
-    }
+  for (int i = 0; i < n_samples; ++i) {
+    uniform_samples.push_back(uniform(gen));
 
-    // print a few samples
-    std::cout << "Uniform: ";
-    for (int i = 0; i < 5; ++i) std::cout << uniform_samples[i] << " ";
-    std::cout << "\nExponential: ";
-    for (int i = 0; i < 5; ++i) std::cout << exp_samples[i] << " ";
-    std::cout << "\nTruncated Normal: ";
-    for (int i = 0; i < 5; ++i) std::cout << normal_samples[i] << " ";
-    std::cout << std::endl;
-    return {exp_samples, uniform_samples, normal_samples};
+    int e = exponential(gen) + min_us;
+    exp_samples.push_back(std::min(e, max_us));
+
+    int n;
+    do {
+      n = normal(gen);
+    } while (n < min_us || n > max_us);
+    normal_samples.push_back(n);
+  }
+
+  // print a few samples
+  std::cout << "Uniform: ";
+  for (int i = 0; i < 5; ++i)
+    std::cout << uniform_samples[i] << " ";
+  std::cout << "\nExponential: ";
+  for (int i = 0; i < 5; ++i)
+    std::cout << exp_samples[i] << " ";
+  std::cout << "\nTruncated Normal: ";
+  for (int i = 0; i < 5; ++i)
+    std::cout << normal_samples[i] << " ";
+  std::cout << std::endl;
+  return {exp_samples, uniform_samples, normal_samples};
 }
-
 
 static std::tuple<double, double>
 compute_avg_latency(const std::map<int, std::unique_ptr<statistics>> &m) {
@@ -225,7 +224,7 @@ void writecb(struct ev_loop *loop, ev_io *w, int revents) {
 namespace {
 void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
   static int count = 0;
-  std::cout << getpid() << ": " << __PRETTY_FUNCTION__ << "\n";
+  // std::cout << getpid() << ": " << __PRETTY_FUNCTION__ << "\n";
   if (revents & EV_READ) {
     char buffer[1024];
     size_t n = read(w->fd, buffer, 22);
@@ -238,11 +237,11 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
       // std::cout << "No more notifications." << std::endl;
       return;
     }
-#ifndef PRINT_DEBUG
+#ifdef PRINT_DEBUG
     std::cout << __func__ << ": count=" << count << "\n";
     count++;
 #endif
-    
+
     writecb(loop, w, revents);
   }
 }
@@ -613,7 +612,7 @@ int stream_stop_sending(ngtcp2_conn *conn, int64_t stream_id,
 namespace {
 int extend_max_local_streams_bidi(ngtcp2_conn *conn, uint64_t max_streams,
                                   void *user_data) {
-   auto c = static_cast<Client *>(user_data);
+  auto c = static_cast<Client *>(user_data);
 
   if (c->on_extend_max_streams() != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1198,19 +1197,20 @@ int Client::handle_expiry() {
 int Client::on_write() {
   if (tx_.send_blocked) {
     if (auto rv = send_blocked_packet(); rv != 0) {
-      std::cout << __PRETTY_FUNCTION__ << ": send_blocked_packet failed: "
-                << rv << std::endl;
+      std::cout << __PRETTY_FUNCTION__ << ": send_blocked_packet failed: " << rv
+                << std::endl;
       return rv;
     }
 
     if (tx_.send_blocked) {
       std::cout << __PRETTY_FUNCTION__
-                << ": Still send_blocked after send_blocked_packet" << std::endl;
+                << ": Still send_blocked after send_blocked_packet"
+                << std::endl;
       return 0;
     }
   }
 
-  //ev_io_stop(loop_, &wev_);
+  // ev_io_stop(loop_, &wev_);
 
   if (auto rv = write_streams(); rv != 0) {
     std::cout << __PRETTY_FUNCTION__ << ": write_streams failed: " << rv
@@ -1222,8 +1222,8 @@ int Client::on_write() {
     ngtcp2_ccerr_set_application_error(
       &last_error_, nghttp3_err_infer_quic_app_error_code(0), nullptr, 0);
     disconnect();
-    std::cout << __PRETTY_FUNCTION__ << ": Exiting because all streams are closed"
-              << std::endl;
+    std::cout << __PRETTY_FUNCTION__
+              << ": Exiting because all streams are closed" << std::endl;
     return -1;
   }
 
@@ -2103,7 +2103,7 @@ int Client::on_extend_max_streams() {
               << " delay_stream is active or handshake not confirmed\n";
     return 0;
   }
-#if 1
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " nstreams_done_=" << nstreams_done_
             << " config.nstreams=" << config.nstreams << "\n";
 #endif
@@ -2124,9 +2124,11 @@ int Client::on_extend_max_streams() {
     }
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
+#if 0
     std::cout << __PRETTY_FUNCTION__ << " opened stream_id=" << stream_id
               << " nstreams_done_=" << nstreams_done_
               << " config.nstreams=" << config.nstreams << "\n";
+#endif
   } else {
     std::cout << __PRETTY_FUNCTION__ << " nstreams_done_=" << nstreams_done_
               << " config.nstreams=" << config.nstreams
@@ -2164,7 +2166,7 @@ serialize_last_cmt_into_char(recv_cmt_msg_t *cmt) {
 nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         size_t veccnt, uint32_t *pflags, void *user_data,
                         void *stream_user_data) {
-  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id << "\n";
+  // std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id << "\n";
   auto ts = util::timestamp();
   recv_cmt_msg_t *last_cmt = recv_queue.pop();
   if (last_cmt == nullptr) {
@@ -2176,7 +2178,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
     last_cmt->blk_id = 0;
   }
 
-#if 1
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " : " << ts
             << " ns, to send cmt about blk_id=" << last_cmt->blk_id
             << " config.datalen=" << config.datalen << "\n";
@@ -2253,9 +2255,12 @@ int Client::submit_http_request(const Stream *stream) {
               << std::endl;
     return -1;
   }
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream->stream_id
-            << " nva.size()=" << nva.size() << " config.datalen="
-            << config.datalen << " count=" << count << "\n";
+            << " nva.size()=" << nva.size()
+            << " config.datalen=" << config.datalen << " count=" << count
+            << "\n";
+#endif
   return 0;
 }
 
@@ -2265,9 +2270,11 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
   auto nconsumed =
     nghttp3_conn_read_stream(httpconn_, stream_id, data.data(), data.size(),
                              flags & NGTCP2_STREAM_DATA_FLAG_FIN);
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
             << " nconsumed=" << nconsumed << " data.size()=" << data.size()
             << " flags=0x" << std::hex << flags << std::dec << "\n";
+#endif
   if (nconsumed < 0) {
     std::cerr << "nghttp3_conn_read_stream: " << nghttp3_strerror(nconsumed)
               << std::endl;
@@ -2539,7 +2546,7 @@ void Client::http_write_data(int64_t stream_id, Span<const uint8_t> data) {
   }
 
   auto &stream = (*it).second;
-#if 1
+#if 0
   std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
             << " data.size()=" << data.size() << "\n";
 #endif
@@ -2601,16 +2608,14 @@ int http_begin_trailers(nghttp3_conn *conn, int64_t stream_id, void *user_data,
   return 0;
 }
 
-int http_end_stream(nghttp3_conn *conn, int64_t stream_id,
-                             void *user_data, void *stream_user_data) {
- 
+int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
+                    void *stream_user_data) {
   auto c = static_cast<Client *>(user_data);
- 
+
   return 0;
 }
 
 } // namespace
-
 
 void Client::send_stream_reply(int64_t stream_id) {
   auto it = streams_.find(stream_id);
@@ -2682,11 +2687,12 @@ void Client::send_stream_reply(int64_t stream_id) {
     if (collect_statistics) {
       std::cout << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
                 << ", data_sz=" << server_reply.size() << ", req_id=" << req_id
-                << ", tx_timestamp=" << latencies_table[stream_id]->tx_timestamp << "ns," << " ack_timestamp=" << latencies_table[stream_id]->ack_timestamp 
-                <<  "ns, latency=" << latency 
-                << " ns (" << latency / 1e6 << "ms)"
-                << " zil_blk_id=" << zil_blk_id << ", poolname=" << poolname
-                << "\n";
+                << ", tx_timestamp=" << latencies_table[stream_id]->tx_timestamp
+                << "ns," << " ack_timestamp="
+                << latencies_table[stream_id]->ack_timestamp
+                << "ns, latency=" << latency << " ns (" << latency / 1e6
+                << "ms)" << " zil_blk_id=" << zil_blk_id
+                << ", poolname=" << poolname << "\n";
     }
 #endif
 
@@ -2719,7 +2725,7 @@ void Client::send_stream_reply(int64_t stream_id) {
 
     uint64_t blk_id = 0;
     memcpy(&blk_id, tx_msg, sizeof(uint64_t));
-#ifndef PRINT
+#ifdef PRINT
     printf("%s send to kernel: {%ld, %dB}\n", __func__, zil_blk_id,
            nlh->nlmsg_len);
 #endif
@@ -2751,7 +2757,6 @@ int http_recv_trailer(nghttp3_conn *conn, int64_t stream_id, int32_t token,
   if (!config.quiet) {
     debug::print_http_header(stream_id, name, value, flags);
   }
- 
 
   return 0;
 }
@@ -2819,7 +2824,7 @@ int http_stream_close(nghttp3_conn *conn, int64_t stream_id,
                       uint64_t app_error_code, void *conn_user_data,
                       void *stream_user_data) {
   auto c = static_cast<Client *>(conn_user_data);
-  //c->send_stream_reply(stream_id);
+  // c->send_stream_reply(stream_id);
   if (c->http_stream_close(stream_id, app_error_code) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }
@@ -3419,12 +3424,13 @@ Options:
 
 static void thread_func_get_cmt() {
   const int n_samples = 1000;
-  const int min_us = 2;       // 2 microseconds
-  const int max_us = 10000;   // 10 milliseconds = 10,000 microseconds
+  const int min_us = 2;     // 2 microseconds
+  const int max_us = 10000; // 10 milliseconds = 10,000 microseconds
   int idx = 0;
-  auto [exp_dist, uni_dist, normal_dist] = construct_distribution(min_us, max_us, n_samples);
+  auto [exp_dist, uni_dist, normal_dist] =
+    construct_distribution(min_us, max_us, n_samples);
   std::this_thread::sleep_for(std::chrono::seconds(5));
- 
+
   char arg_poolname[ZFS_MAX_DATASET_NAME_LEN] =
     "test_pool"; // example pool name
   // create socket and connect to other thread
@@ -3495,8 +3501,8 @@ static void thread_func_get_cmt() {
   src_addr.nl_groups = 0;     /* not in mcast groups */
   bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr));
   while (ready.load() == false) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
   for (;;) {
     struct timespec start, end;
 
@@ -3554,14 +3560,14 @@ static void thread_func_get_cmt() {
     recv_cmt_msg_t *recv_msg =
       deserialize_recv_cmt(reinterpret_cast<char *>(NLMSG_DATA(nlh)));
     if (expected_blk_id != recv_msg->blk_id) {
-      #if 0
+#if 0
       printf("received unexpected blk_id=%ld, expected=%ld, just reload the "
              "kernel-module ..\n",
              recv_msg->blk_id, expected_blk_id);
-      #endif
+#endif
       // exit(0);
     }
-#ifndef PRINT
+#ifdef PRINT
     printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
            recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
 #endif
@@ -3573,11 +3579,10 @@ static void thread_func_get_cmt() {
 
     send(socket_fd, "Hello from cmt thread", 22, 0);
     // std::this_thread::sleep_for(std::chrono::microseconds(normal_dist[idx%n_samples]));
-    //std::this_thread::sleep_for(std::chrono::microseconds(1000000));
+    // std::this_thread::sleep_for(std::chrono::microseconds(1000000));
     if (idx >= n_samples) {
       idx = 0; // reset index to loop through the distribution
-    }
-    else 
+    } else
       idx++;
   }
 }
@@ -3587,7 +3592,6 @@ int main(int argc, char **argv) {
   char *data_path = nullptr;
   const char *private_key_file = nullptr;
   const char *cert_file = nullptr;
-  
 
   std::thread get_cmt_thread = std::thread(thread_func_get_cmt);
 

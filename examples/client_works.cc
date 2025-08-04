@@ -2255,7 +2255,7 @@ int Client::submit_http_request(const Stream *stream) {
   };
 
   size_t nvlen = 5;
-  //if (config.fd != -1) {
+  // if (config.fd != -1) {
   content_length_str = util::format_uint(config.datalen);
   nva[nvlen++] = util::make_nv_nc("content-length", content_length_str);
   //}

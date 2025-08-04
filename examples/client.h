@@ -83,7 +83,7 @@ public:
   int init_local(int fd, const Address &local_addr, const Address &remote_addr,
                  const char *addr, const char *port);
   void disconnect();
-  
+
   int on_read(const Endpoint &ep);
   int on_write();
   int write_streams();

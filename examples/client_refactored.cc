@@ -2024,7 +2024,7 @@ static std::tuple<bool, int> wait_until_received_ack(int cur_req_no) {
 
 int Client::on_extend_max_streams() {
   int64_t stream_id;
-  
+
   if ((config.delay_stream && !handshake_confirmed_) ||
       ev_is_active(&delay_stream_timer_)) {
     std::cout << __PRETTY_FUNCTION__
@@ -2039,8 +2039,8 @@ int Client::on_extend_max_streams() {
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
       assert(NGTCP2_ERR_STREAM_ID_BLOCKED == rv);
-      std::cerr << "ngtcp2_conn_open_bidi_stream: " << " stream_id=" << stream_id << " " << ngtcp2_strerror(rv)
-                << std::endl;
+      std::cerr << "ngtcp2_conn_open_bidi_stream: " << " stream_id="
+                << stream_id << " " << ngtcp2_strerror(rv) << std::endl;
       return 0;
     }
 
@@ -2050,7 +2050,7 @@ int Client::on_extend_max_streams() {
     if (submit_http_request(stream.get()) != 0) {
       std::cerr << __PRETTY_FUNCTION__ << ": submit_http_request\n";
       return 0;
-    }    
+    }
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
   } else {
@@ -2091,7 +2091,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         size_t veccnt, uint32_t *pflags, void *user_data,
                         void *stream_user_data) {
   // @dimitra: add timestamp
-  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id <<"\n";
+  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id << "\n";
   auto ts = util::timestamp();
   recv_cmt_msg_t *last_cmt = recv_queue.pop();
   if (last_cmt == nullptr) {
@@ -2267,7 +2267,6 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
 
     ::memcpy(&req_id, server_reply.data() + 6 + sizeof(timestamp),
              sizeof(req_id));
-    
 
     uint64_t zil_blk_id = -1;
     ::memcpy(&zil_blk_id,
@@ -2287,7 +2286,7 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
       latencies_table[stream_id]->ack_timestamp = now;
       latencies_table[stream_id]->acked = true;
     }
-    
+
     if (collect_statistics) {
       if (latencies_table[stream_id]->req_id != req_id) {
         std::cerr << __PRETTY_FUNCTION__ << " stream_id=" << stream_id
@@ -2372,7 +2371,6 @@ out:
 }
 
 int Client::acked_stream_data_offset(int64_t stream_id, uint64_t datalen) {
-  
   if (auto rv = nghttp3_conn_add_ack_offset(httpconn_, stream_id, datalen);
       rv != 0) {
     std::cerr << "nghttp3_conn_add_ack_offset: " << nghttp3_strerror(rv)
@@ -2426,14 +2424,12 @@ int Client::select_preferred_address(Address &selected_addr,
 namespace {
 int http_recv_data(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
                    size_t datalen, void *user_data, void *stream_user_data) {
-  
-
   if (!config.quiet && !config.no_http_dump) {
     debug::print_http_data(stream_id, {data, datalen});
   }
   auto c = static_cast<Client *>(user_data);
   c->http_consume(stream_id, datalen);
-  
+
   c->http_write_data(stream_id, {data, datalen});
   return 0;
 }
@@ -3884,19 +3880,17 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-    constexpr auto magic_num = 0x50415458; // "PUTX"
-    config.fd = magic_num;
-    config.datalen = k_msg_size + 6;
-         config.data = new uint8_t[config.datalen]; // static_cast<uint8_t *>(addr);
-  
-      config.data[0] = 'P';
-      config.data[1] = 'U';
-      config.data[2] = 'T';
-      config.data[3] = ' ';
-      config.data[4] = 'X';
-      config.data[5] = ' ';
+  constexpr auto magic_num = 0x50415458; // "PUTX"
+  config.fd = magic_num;
+  config.datalen = k_msg_size + 6;
+  config.data = new uint8_t[config.datalen]; // static_cast<uint8_t *>(addr);
 
-  
+  config.data[0] = 'P';
+  config.data[1] = 'U';
+  config.data[2] = 'T';
+  config.data[3] = ' ';
+  config.data[4] = 'X';
+  config.data[5] = ' ';
 
   auto addr = argv[optind++];
   auto port = argv[optind++];

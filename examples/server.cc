@@ -331,7 +331,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         void *stream_user_data) {
   auto stream = static_cast<Stream *>(stream_user_data);
 
-  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id <<"\n";
+  std::cout << __PRETTY_FUNCTION__ << ": stream_id=" << stream_id << "\n";
   vec[0].base = stream->data;
   // auto ts = util::timestamp();
   // ::memcpy(stream->data, )
@@ -1186,7 +1186,11 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
                     void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
-  
+  static int count = 0;
+  if (count % 1000 == 0) {
+    std::cout << __func__ << ": count=" << count++ << "\n";
+  }
+
   if (h->http_end_stream(stream) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }
