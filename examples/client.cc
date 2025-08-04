@@ -3424,7 +3424,7 @@ Options:
 }
 } // namespace
 
-static void thread_func_get_cmt() {
+static void thread_func_get_cmt(void* in_poolname) {
   const int n_samples = 1000;
   const int min_us = 2;     // 2 microseconds
   const int max_us = 10000; // 10 milliseconds = 10,000 microseconds
@@ -3433,8 +3433,10 @@ static void thread_func_get_cmt() {
     construct_distribution(min_us, max_us, n_samples);
   std::this_thread::sleep_for(std::chrono::seconds(5));
 
-  char arg_poolname[ZFS_MAX_DATASET_NAME_LEN] =
-    "test_pool"; // example pool name
+  char arg_poolname[ZFS_MAX_DATASET_NAME_LEN];
+  memcpy(arg_poolname, reinterpret_cast<char*>(in_poolname), strlen(reinterpret_cast<char*>(in_poolname)));
+  std::cout << __func__ << ": Thread started for pool=" << arg_poolname
+            << std::endl;
   // create socket and connect to other thread
   std::cout << __func__ << ": Thread started for pool=" << arg_poolname
             << std::endl;
@@ -3595,7 +3597,7 @@ int main(int argc, char **argv) {
   const char *private_key_file = nullptr;
   const char *cert_file = nullptr;
 
-  std::thread get_cmt_thread = std::thread(thread_func_get_cmt);
+  std::thread get_cmt_thread = std::thread(thread_func_get_cmt, argv[1]);
 
   if (argc) {
     prog = basename(argv[0]);
