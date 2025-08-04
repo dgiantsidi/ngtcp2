@@ -1190,7 +1190,7 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
   if (count % 1000 == 0) {
     std::cout << __func__ << ": count=" << count++ << "\n";
   }
-
+  count++;
   if (h->http_end_stream(stream) != 0) {
     return NGHTTP3_ERR_CALLBACK_FAILURE;
   }

@@ -2122,6 +2122,8 @@ int Client::on_extend_max_streams() {
       std::cerr << __PRETTY_FUNCTION__ << ": submit_http_request\n";
       return 0;
     }
+    std::cout << __PRETTY_FUNCTION__ << "stream_id=" << stream_id 
+              << " has elems to be processed\n";
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
 #if 0
