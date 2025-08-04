@@ -2122,8 +2122,10 @@ int Client::on_extend_max_streams() {
       std::cerr << __PRETTY_FUNCTION__ << ": submit_http_request\n";
       return 0;
     }
+    #if 0
     std::cout << __PRETTY_FUNCTION__ << "stream_id=" << stream_id 
               << " has elems to be processed\n";
+    #endif
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
 #if 0
@@ -2132,9 +2134,11 @@ int Client::on_extend_max_streams() {
               << " config.nstreams=" << config.nstreams << "\n";
 #endif
   } else {
+    #if 0
     std::cout << __PRETTY_FUNCTION__ << "stream_id=" << stream_id << ", nstreams_done_=" << nstreams_done_
               << " config.nstreams=" << config.nstreams
               << " no more streams to open\n";
+    #endif
   }
   return 0;
 }
