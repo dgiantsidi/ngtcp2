@@ -77,6 +77,16 @@ struct statistics {
   bool acked = false;
   uint64_t tx_timestamp = 0;
   uint64_t ack_timestamp = 0;
+  std::string serialize_statistics() {
+    std::string buf;
+    buf += std::to_string(req_id) + ":(stream_id=" + std::to_string(req_id) + ") " +
+       "tx_timestamp=" + std::to_string(tx_timestamp)
+       + ", ack_timestamp=" + std::to_string(ack_timestamp)
+       + ", computed latency= " + std::to_string(ack_timestamp - tx_timestamp)
+       + "ns, " + std::to_string((ack_timestamp - tx_timestamp) / 1000000.0)
+       + " ms)\n";
+    return buf;
+  }
   friend std::ostream &operator<<(std::ostream &os, const statistics &stats) {
     os << stats.req_id << ":(stream_id=" << stats.stream_id << ") " << std::dec
        << "tx_timestamp=" << stats.tx_timestamp
@@ -94,7 +104,7 @@ constexpr size_t k_msg_size =
 // do not modify the value of k_magic_number
 constexpr int k_magic_number = 5;
 constexpr int server_port = 7000;
-constexpr int statistics_rate = 100; // every 10K requests
+constexpr int statistics_rate = 1; // every 10K requests
 
 std::map<int, std::unique_ptr<statistics>> latencies_table;
 static std::atomic<uint64_t> global_req_id{0};
@@ -4234,6 +4244,21 @@ int main(int argc, char **argv) {
     }
   }
 
+  auto results_fd = open("results_quic.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (results_fd < 0) {
+    std::cerr << "Unable to open results_quic.txt: " << strerror(errno)
+              << std::endl;
+  }
+  else {
+    std::cout << "Writing results to results_quic.txt" << std::endl;
+    for (const auto &r : latencies_table) {
+      std::string line = r.second->serialize_statistics();
+      if (write(results_fd, line.c_str(), line.size()) < 0) {
+        std::cerr << "Error writing to results_quic.txt: " << strerror(errno)
+                  << std::endl;
+      }
+    }
+  }
   std::cout << latencies_table << "\n";
   auto [avg_lat, std_lat] = compute_avg_latency(latencies_table);
   std::cout << "avg_lat = " << avg_lat << " std_lat=" << std_lat << " over "
