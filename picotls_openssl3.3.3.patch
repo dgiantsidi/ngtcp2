@@ -1,0 +1,12 @@
+diff --git a/include/picotls/openssl.h b/include/picotls/openssl.h
+index 526285c..f9d3592 100644
+--- a/include/picotls/openssl.h
++++ b/include/picotls/openssl.h
+@@ -37,6 +37,7 @@ extern "C" {
+ #define PTLS_OPENSSL_HAVE_CHACHA20_POLY1305 1
+ #else
+ #define PTLS_OPENSSL_HAVE_CHACHA20_POLY1305 0
++#undef PTLS_OPENSSL_HAVE_CHACHA20_POLY1305
+ #endif
+ 
+ #if OPENSSL_VERSION_NUMBER >= 0x10100010L && !defined(LIBRESSL_VERSION_NUMBER) && \
