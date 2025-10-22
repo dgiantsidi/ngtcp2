@@ -59,7 +59,7 @@ std::optional<std::string> read_pem(const std::string_view &filename,
                                     const std::string_view &type);
 
 int write_pem(const std::string_view &filename, const std::string_view &name,
-              const std::string_view &type, Span<const uint8_t> data);
+              const std::string_view &type, std::span<const uint8_t> data);
 
 namespace {
 constexpr char LOWER_XDIGITS[] = "0123456789abcdef";
