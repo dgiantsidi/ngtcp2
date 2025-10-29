@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
 #include <tuple>
-
+#define ZFS_MAX_DATASET_NAME_LEN 256
 struct quic_message {
     using k_timestamp = uint64_t;
     using k_request_id = uint64_t;
@@ -54,5 +54,16 @@ struct quic_message {
         ::memcpy(msg_ptr.get()+offset, &payload_sz, sizeof(payload_sz));
         ::memcpy(msg_ptr.get() + quic_message::payload_offset(), payload.get(), 6);
         return {std::move(msg_ptr), sz};
+    }
+
+    uint64_t get_blk_id_from_payload() {
+        uint64_t blk_id = 0;
+        ::memcpy(&blk_id, payload.get(), sizeof(uint64_t));
+        return blk_id;
+    }
+    std::tuple<std::unique_ptr<char[]>, size_t> get_poolname_from_payload() {
+        std::unique_ptr<char[]> poolname = std::make_unique<char[]>(ZFS_MAX_DATASET_NAME_LEN);
+        ::memcpy(poolname.get(), payload.get()+ sizeof(uint64_t), ZFS_MAX_DATASET_NAME_LEN);
+        return {std::move(poolname), ZFS_MAX_DATASET_NAME_LEN};
     }
 };

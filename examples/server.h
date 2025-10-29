@@ -22,34 +22,39 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+
+#pragma once
 #ifndef SERVER_H
-#define SERVER_H
+#  define SERVER_H
 
-#ifdef HAVE_CONFIG_H
-#  include <config.h>
-#endif // defined(HAVE_CONFIG_H)
+#  ifdef HAVE_CONFIG_H
+#    include <config.h>
+#  endif // defined(HAVE_CONFIG_H)
 
-#include <vector>
-#include <unordered_map>
-#include <string>
-#include <deque>
-#include <string_view>
-#include <memory>
-#include <functional>
+#  include <vector>
+#  include <unordered_map>
+#  include <string>
+#  include <deque>
+#  include <string_view>
+#  include <memory>
+#  include <functional>
+#  include <thread>
+#  include <mutex>
 
 // #include <span>
-#include "custom_span.h"
+#  include "custom_span.h"
 
-#include <ngtcp2/ngtcp2.h>
-#include <ngtcp2/ngtcp2_crypto.h>
-#include <nghttp3/nghttp3.h>
-#include <ev.h>
+#  include <ngtcp2/ngtcp2.h>
+#  include <ngtcp2/ngtcp2_crypto.h>
+#  include <nghttp3/nghttp3.h>
+#  include <ev.h>
 
-#include "server_base.h"
-#include "tls_server_context.h"
-#include "network.h"
-#include "shared.h"
-#include "message_format.h"
+#  include "server_base.h"
+#  include "tls_server_context.h"
+#  include "network.h"
+#  include "shared.h"
+#  include "message_format.h"
+#  include <queue>
 
 using namespace ngtcp2;
 
@@ -64,29 +69,37 @@ struct HTTPHeader {
 class Handler;
 struct FileEntry;
 
-
 struct callable_replication {
-  explicit callable_replication(std::shared_ptr<void> dr, const std::function<void(std::weak_ptr<void>, uint64_t, uint8_t*, size_t)> f) {
+  explicit callable_replication(
+    std::shared_ptr<void> dr,
+    const std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)>
+      f,
+    const std::function<uint64_t(std::weak_ptr<void>)> c_f = nullptr) {
     func = f;
+    check_func = c_f;
     driver = dr;
   }
-  void invoke(uint64_t req_id, uint8_t* data = nullptr, size_t sz = 0) {
+  void invoke(uint64_t req_id, uint8_t *data = nullptr, size_t sz = 0) {
     if (data)
       func(driver, req_id, data, sz);
-    else 
+    else
       func(driver, req_id, nullptr, 0);
   }
-  std::function<void(std::weak_ptr<void>, uint64_t ,uint8_t*, size_t)> func;
+  uint64_t invoke_check() { return check_func(driver); }
+  std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)> func;
+  std::function<uint64_t(std::weak_ptr<void>)> check_func;
   std::weak_ptr<void> driver;
 };
 
 struct Stream {
   Stream(int64_t stream_id, Handler *handler);
 
-  int start_response(nghttp3_conn *conn, std::unique_ptr<quic_message> msg_ptr = nullptr);
+  int start_response(nghttp3_conn *conn,
+                     std::unique_ptr<quic_message> msg_ptr = nullptr);
   std::pair<FileEntry, int> open_file(const std::string &path);
   void map_file(const FileEntry &fe);
-  int send_status_response(nghttp3_conn *conn, unsigned int status_code, std::unique_ptr<quic_message> msg_ptr = nullptr,
+  int send_status_response(nghttp3_conn *conn, unsigned int status_code,
+                           std::unique_ptr<quic_message> msg_ptr = nullptr,
                            const std::vector<HTTPHeader> &extra_headers = {});
   int send_redirect_response(nghttp3_conn *conn, unsigned int status_code,
                              const std::string_view &path);
@@ -121,6 +134,12 @@ struct Endpoint {
   ev_io rev;
   Server *server;
   int fd;
+};
+
+struct queue_item {
+  Handler *handler;
+  Stream *stream;
+  std::unique_ptr<quic_message> msg;
 };
 
 class Handler : public HandlerBase {
@@ -174,7 +193,8 @@ public:
                                 nghttp3_rcbuf *name, nghttp3_rcbuf *value);
   int http_end_request_headers(Stream *stream);
   int http_end_stream(Stream *stream);
-  int start_response(Stream *stream, std::unique_ptr<quic_message> msg_ptr = nullptr);
+  int start_response(Stream *stream,
+                     std::unique_ptr<quic_message> msg_ptr = nullptr);
   int on_stream_reset(int64_t stream_id);
   int on_stream_stop_sending(int64_t stream_id);
   int extend_max_stream_data(int64_t stream_id, uint64_t max_data);
@@ -190,19 +210,23 @@ public:
                        const ngtcp2_addr &remote_addr, unsigned int ecn,
                        Span<const uint8_t> data, size_t gso_size);
   void start_wev_endpoint(const Endpoint &ep);
-  
+
   int send_blocked_packet();
   std::unordered_map<int64_t, std::unique_ptr<Stream>> streams_;
 
-  
+  nghttp3_conn *httpconn_;
+  int64_t ctrl_stream_id;
+  int64_t qpack_enc_stream_id, qpack_dec_stream_id;
+
 private:
   struct ev_loop *loop_;
   Server *server_;
+  std::mutex handler_mtx_;
   ev_io wev_;
   ev_timer timer_;
   FILE *qlog_;
   ngtcp2_cid scid_;
-  nghttp3_conn *httpconn_;
+  // nghttp3_conn *httpconn_;
   // conn_closebuf_ contains a packet which contains CONNECTION_CLOSE.
   // This packet is repeatedly sent as a response to the incoming
   // packet in draining period.
@@ -283,32 +307,126 @@ public:
   void dissociate_cid(const ngtcp2_cid *cid);
 
   void on_stateless_reset_regen();
-  void assign_server_id(const int& id) {
-    server_id = id;
-  };
+  void assign_server_id(const int &id) { server_id = id; };
 
-  int get_id() {
-    return server_id;
-  }
+  int get_id() { return server_id; }
 
-  int replicate_cmd(uint64_t req_id, uint8_t* data = nullptr, size_t sz = 0) {
-    /*
-    for (auto i = 0ULL; i < 5; i++) {
-            std::cout << (char)data[i];
-        }
-  std::cout << "\n";
-  */
+  int replicate_cmd(uint64_t req_id, uint8_t *data = nullptr, size_t sz = 0) {
     replication->invoke(req_id, data, sz);
     return 0;
   }
 
-  bool cmd_replicated(uint64_t req_id=0) {
-    return true;
+  uint64_t cmd_replicated() {
+    uint64_t committed_seqno = replication->invoke_check();
+    std::cout << "*====RAFT====* " << __PRETTY_FUNCTION__
+              << ": committed_seqno=" << committed_seqno << "\n";
+    return committed_seqno;
   }
 
   void register_replication(std::shared_ptr<callable_replication> callback) {
     replication = callback;
   }
+
+  void reply_func(const uint64_t last_cmt_seqno) {
+    {
+#  if 1
+      while (!response_queue.empty()) {
+        auto &item = response_queue.front();
+        uint64_t blk_id = item->msg->req_id;
+
+        if (cmd_replicated() >= blk_id) {
+          std::cout << "*====STATUS====* " << __PRETTY_FUNCTION__
+                    << ": Processing response queue, stream_id="
+                    << item->stream->stream_id << ", blk_id=" << blk_id << "\n";
+          item->stream->start_response(item->handler->httpconn_,
+                                       std::move(item->msg));
+          // item->handler->on_stream_close(item->stream->stream_id,
+          // NGHTTP3_H3_NO_ERROR);
+          response_queue.pop();
+        } else {
+          return;
+        }
+      }
+#  endif
+    }
+  }
+
+  void server_reply_thread_func(void *server) {
+    int socket_fd = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+    if (socket_fd < 0) {
+      std::cerr << __func__ << ":" << __LINE__ << ": error creating socket"
+                << std::endl;
+      return;
+    }
+    if (socket_fd < 0) {
+      std::cerr << __func__ << ":" << __LINE__ << ": error creating socket"
+                << std::endl;
+      return;
+    }
+
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(12345); // port number
+
+    // convert IP address from text to binary
+    if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
+      std::cerr << __func__ << ":" << __LINE__
+                << ": error converting IP address" << std::endl;
+      ::close(socket_fd);
+      return;
+    }
+
+    // connect to the server
+    if (connect(socket_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+      std::cerr << __func__ << ":" << __LINE__
+                << ": error connecting to the server" << std::endl;
+      ::close(socket_fd);
+      return;
+    }
+    // Set the socket to non-blocking mode
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags == -1) {
+      std::cerr << __func__ << ":" << __LINE__
+                << ": error getting flags for socket" << std::endl;
+      ::close(socket_fd);
+      return;
+    }
+
+    if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+      std::cerr << __func__ << ":" << __LINE__
+                << ": error setting non-blocking mode" << std::endl;
+      ::close(socket_fd);
+      return;
+    }
+
+    std::cout << __func__
+              << ": Thread has connected to the notifications thread!"
+              << std::endl;
+    Server *srv = static_cast<Server *>(server);
+    uint64_t cur_seq_no = 0;
+    while (true) {
+      {
+        std::lock_guard<std::mutex> lock(srv->queue_mutex);
+        if (!srv->response_queue.empty()) {
+          if (srv->cmd_replicated() != cur_seq_no) {
+            cur_seq_no = srv->cmd_replicated();
+            // send to the thread that seqno changed
+            std::cout << "*====NOTIFY====* " << __PRETTY_FUNCTION__
+                      << ": Notifying cmt thread, cur_seq_no=" << cur_seq_no
+                      << "\n";
+            send(socket_fd, &cur_seq_no, sizeof(uint64_t), 0);
+          }
+        } else {
+          std::cout << "*====NOTIFY====* " << __PRETTY_FUNCTION__
+                    << ": response_queue is empty, sleeping...\n";
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(100000));
+    }
+  }
+
+  std::queue<std::unique_ptr<queue_item>> response_queue;
+  std::mutex queue_mutex;
 
 private:
   std::unordered_map<std::string, Handler *, string_hash, std::equal_to<>>
@@ -318,17 +436,18 @@ private:
   TLSServerContext &tls_ctx_;
   ev_signal sigintev_;
   ev_timer stateless_reset_regen_timer_;
+  ev_timer timer_;
+
   size_t stateless_reset_bucket_;
   int server_id = -1;
   std::shared_ptr<callable_replication> replication;
-
+  std::thread reply_thread;
+  ev_io wev; // local-thread related
+  int server_port = 12345;
 };
 
 #endif // !defined(SERVER_H)
 
-
-
 void config_set_default(Config &config);
-
 
 void print_usage();

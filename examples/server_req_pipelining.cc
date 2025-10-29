@@ -324,7 +324,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
                         void *stream_user_data) {
   auto stream = static_cast<Stream *>(stream_user_data);
 
-  vec[0].base = stream->data; //stream->data_vec.data();
+  vec[0].base = stream->data; // stream->data_vec.data();
   vec[0].len = stream->datalen;
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
   if (config.send_trailers) {
@@ -418,7 +418,6 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
   datalen = status_resp_body.size();
   data = new uint8_t[datalen];
   ::memcpy(data, (uint8_t *)status_resp_body.data(), datalen);
-  
 
   nghttp3_data_reader dr{};
   dr.read_data = read_data;
