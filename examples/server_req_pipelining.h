@@ -59,6 +59,21 @@
 using namespace ngtcp2;
 constexpr size_t MAX_MSG_SIZE = 1024;
 
+class Handler;
+class Stream;
+static int local_server_port = 12345;
+
+struct queue_item {
+  Handler *handler;
+  Stream *stream;
+  std::unique_ptr<quic_message> msg;
+};
+
+struct replies {
+  std::queue<std::unique_ptr<queue_item>> response_queue;
+  std::mutex queue_mutex;
+};
+
 struct HTTPHeader {
   HTTPHeader(const std::string_view &name, const std::string_view &value)
     : name(name), value(value) {}
@@ -67,27 +82,27 @@ struct HTTPHeader {
   std::string_view value;
 };
 
-class Handler;
-struct FileEntry;
-
-struct callable_replication {
-  explicit callable_replication(
+struct ccf_callbacks_set {
+  explicit ccf_callbacks_set(
     std::shared_ptr<void> dr,
     const std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)>
       f,
     const std::function<uint64_t(std::weak_ptr<void>)> c_f = nullptr) {
-    func = f;
+    replicate_func = f;
     check_func = c_f;
     driver = dr;
   }
   void invoke(uint64_t req_id, uint8_t *data = nullptr, size_t sz = 0) {
     if (data)
-      func(driver, req_id, data, sz);
+      replicate_func(driver, req_id, data, sz);
     else
-      func(driver, req_id, nullptr, 0);
+      replicate_func(driver, req_id, nullptr, 0);
   }
   uint64_t invoke_check() { return check_func(driver); }
-  std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)> func;
+  // function obj to replicate the data
+  std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)>
+    replicate_func;
+  // function obj to check the committed seqno
   std::function<uint64_t(std::weak_ptr<void>)> check_func;
   std::weak_ptr<void> driver;
 };
@@ -98,15 +113,12 @@ struct Stream {
 
   int start_response(nghttp3_conn *conn,
                      std::unique_ptr<quic_message> msg_ptr = nullptr);
-  std::pair<FileEntry, int> open_file(const std::string &path);
-  void map_file(const FileEntry &fe);
   int send_status_response(nghttp3_conn *conn, unsigned int status_code,
                            std::unique_ptr<quic_message> msg_ptr = nullptr,
                            const std::vector<HTTPHeader> &extra_headers = {});
   int send_redirect_response(nghttp3_conn *conn, unsigned int status_code,
                              const std::string_view &path);
-  int64_t find_dyn_length(const std::string_view &path);
-  void http_acked_stream_data(uint64_t datalen);
+  [[__maybe_unused__]] void http_acked_stream_data(uint64_t datalen);
 
   int64_t stream_id;
   Handler *handler;
@@ -115,33 +127,31 @@ struct Stream {
   std::string method;
   std::string authority;
   std::string status_resp_body;
-  // data is a pointer to the memory which maps file denoted by fd.
+
+  // buffer with the data to be sent
   uint8_t *data;
-  // datalen is the length of mapped file by data.
+  // datalen (size of *data)
   uint64_t datalen;
+  // received data
+  std::vector<uint8_t> data_vec;
+
+  // @dimitra: maybe used so you can remove
   // dynresp is true if dynamic data response is enabled.
   bool dynresp;
   // dyndataleft is the number of dynamic data left to send.
   uint64_t dyndataleft;
   // dynbuflen is the number of bytes in-flight.
   uint64_t dynbuflen;
-  std::vector<uint8_t> data_vec;
 };
 
 class Server;
 
-// Endpoint is a local endpoint.
+// Endpoint is a local endpoint for QUIC.
 struct Endpoint {
   Address addr;
   ev_io rev;
   Server *server;
   int fd;
-};
-
-struct queue_item {
-  Handler *handler;
-  Stream *stream;
-  std::unique_ptr<quic_message> msg;
 };
 
 class Handler : public HandlerBase {
@@ -224,7 +234,7 @@ private:
   struct ev_loop *loop_;
   Server *server_;
   std::mutex handler_mtx_;
-  ev_io wev_;
+  ev_io wev_, wev;
   ev_timer timer_;
   FILE *qlog_;
   ngtcp2_cid scid_;
@@ -320,115 +330,98 @@ public:
 
   uint64_t cmd_replicated() {
     uint64_t committed_seqno = replication->invoke_check();
-    std::cout << "*====RAFT====* " << __PRETTY_FUNCTION__
+    std::cout << "*==== CCF ====* " << __PRETTY_FUNCTION__
               << ": committed_seqno=" << committed_seqno << "\n";
     return committed_seqno;
   }
 
-  void register_replication(std::shared_ptr<callable_replication> callback) {
+  void register_replication(std::shared_ptr<ccf_callbacks_set> callback) {
     replication = callback;
   }
 
   void reply_func(const uint64_t last_cmt_seqno) {
     {
-#  if 1
-      while (!response_queue.empty()) {
-        auto &item = response_queue.front();
+      std::lock_guard<std::mutex> lock(queue_handle->queue_mutex);
+      while (!queue_handle->response_queue.empty()) {
+        auto &item = queue_handle->response_queue.front();
         uint64_t blk_id = item->msg->req_id;
 
         if (cmd_replicated() >= blk_id) {
-          std::cout << "*====STATUS====* " << __PRETTY_FUNCTION__
-                    << ": Processing response queue, stream_id="
-                    << item->stream->stream_id << ", blk_id=" << blk_id << "\n";
+          std::cout << "*==== QUEUE ====* " << __PRETTY_FUNCTION__
+                    << ": respond to stream_id=" << item->stream->stream_id
+                    << " for blk_id=" << blk_id << "\n";
           item->stream->start_response(item->handler->httpconn_,
                                        std::move(item->msg));
-          // item->handler->on_stream_close(item->stream->stream_id,
-          // NGHTTP3_H3_NO_ERROR);
-          response_queue.pop();
+          queue_handle->response_queue.pop();
         } else {
           return;
         }
       }
-#  endif
     }
   }
 
-  void server_reply_thread_func(void *server) {
-    int socket_fd = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
-    if (socket_fd < 0) {
-      std::cerr << __func__ << ":" << __LINE__ << ": error creating socket"
-                << std::endl;
-      return;
-    }
-    if (socket_fd < 0) {
-      std::cerr << __func__ << ":" << __LINE__ << ": error creating socket"
-                << std::endl;
-      return;
-    }
+  int create_local_endpoint_receiver() {
+    auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(12345); // port number
+    server_addr.sin_addr.s_addr = INADDR_ANY;        // listen on all interfaces
+    server_addr.sin_port = htons(local_server_port); // specify port number
 
-    // convert IP address from text to binary
-    if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
-      std::cerr << __func__ << ":" << __LINE__
-                << ": error converting IP address" << std::endl;
-      ::close(socket_fd);
-      return;
+    if (bind(server_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " could not bind to port " << local_server_port << std::endl;
+      ::close(server_fd);
+      return -1;
     }
 
-    // connect to the server
-    if (connect(socket_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-      std::cerr << __func__ << ":" << __LINE__
-                << ": error connecting to the server" << std::endl;
-      ::close(socket_fd);
-      return;
-    }
-    // Set the socket to non-blocking mode
-    int flags = fcntl(socket_fd, F_GETFL, 0);
-    if (flags == -1) {
-      std::cerr << __func__ << ":" << __LINE__
-                << ": error getting flags for socket" << std::endl;
-      ::close(socket_fd);
-      return;
+    if (listen(server_fd, 5) < 0) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " could not listen on port " << local_server_port
+                << std::endl;
+      ::close(server_fd);
+      return -1;
     }
 
-    if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-      std::cerr << __func__ << ":" << __LINE__
-                << ": error setting non-blocking mode" << std::endl;
-      ::close(socket_fd);
-      return;
-    }
-
-    std::cout << __func__
-              << ": Thread has connected to the notifications thread!"
+    std::cout << "*==== SYSTEM OPERATION ====* " << __func__
+              << " we listen for connections at " << local_server_port
               << std::endl;
-    Server *srv = static_cast<Server *>(server);
-    uint64_t cur_seq_no = 0;
-    while (true) {
-      {
-        std::lock_guard<std::mutex> lock(srv->queue_mutex);
-        if (!srv->response_queue.empty()) {
-          if (srv->cmd_replicated() != cur_seq_no) {
-            cur_seq_no = srv->cmd_replicated();
-            // send to the thread that seqno changed
-            std::cout << "*====NOTIFY====* " << __PRETTY_FUNCTION__
-                      << ": Notifying cmt thread, cur_seq_no=" << cur_seq_no
-                      << "\n";
-            send(socket_fd, &cur_seq_no, sizeof(uint64_t), 0);
-          }
-        } else {
-          std::cout << "*====NOTIFY====* " << __PRETTY_FUNCTION__
-                    << ": response_queue is empty, sleeping...\n";
-        }
-      }
-      std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    }
-  }
 
-  std::queue<std::unique_ptr<queue_item>> response_queue;
-  std::mutex queue_mutex;
+    sockaddr_in client_addr{};
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd = accept(server_fd, (sockaddr *)&client_addr, &client_len);
+    if (client_fd < 0) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " error accepting connections (" << strerror(errno) << ")"
+                << std::endl;
+      ::close(server_fd);
+      return -1;
+    }
+
+    std::cout << "*==== SYSTEM OPERATION ====* " << __func__
+              << " accepted connection from monitor thread " << std::endl;
+
+    // set the socket to non-blocking mode
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    if (flags == -1) {
+      std::cerr << "*==== ERROR ====* " << __func__ << " error getting flags ("
+                << strerror(errno) << ")" << std::endl;
+      ::close(client_fd);
+      return -1;
+    }
+
+    if (fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " error setting the O_NONBLOCK mode (" << strerror(errno)
+                << ")" << std::endl;
+      ::close(client_fd);
+      return -1;
+    }
+    return client_fd;
+  }
+  struct replies *queue_handle;
+
+  int get_local_endpoint() { return local_endpoint; }
 
 private:
   std::unordered_map<std::string, Handler *, string_hash, std::equal_to<>>
@@ -439,16 +432,90 @@ private:
   ev_signal sigintev_;
   ev_timer stateless_reset_regen_timer_;
   ev_timer timer_;
-
+  int local_endpoint;
   size_t stateless_reset_bucket_;
   int server_id = -1;
-  std::shared_ptr<callable_replication> replication;
-  std::thread reply_thread;
-  ev_io wev; // local-thread related
-  int server_port = 12345;
+  std::shared_ptr<ccf_callbacks_set> replication;
 };
 
 #endif // !defined(SERVER_H)
+
+class ccf_monitor {
+public:
+  std::thread reply_thread;
+  struct replies *handle_queue;
+  ccf_monitor(Server *server, struct replies *handle)
+    : srv(server), handle_queue(handle) {
+    reply_thread = std::thread(&ccf_monitor::ccf_monitor_thread_func, this);
+  }
+
+private:
+  Server *srv;
+
+public:
+  int create_local_endpoint_sender() {
+    int socket_fd = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+    if (socket_fd < 0) {
+      std::cerr << "*=== =ERROR ====* " << __func__
+                << " error creating socket\n";
+      return -1;
+    }
+
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(local_server_port);
+
+    // convert IP address from text to binary
+    if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " error converting IP address" << std::endl;
+      ::close(socket_fd);
+      return -1;
+    }
+
+    int connect_tries = 0;
+    for (;;) {
+      // connect to the server
+      if (connect(socket_fd, (sockaddr *)&server_addr, sizeof(server_addr)) <
+          0) {
+        std::cerr << "*==== ERROR ====* " << __func__
+                  << " error connecting to the server"
+                  << " (" << std::strerror(errno) << ")" << std::endl;
+        connect_tries++;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        if (connect_tries > 1000) {
+          ::close(socket_fd);
+          return -1;
+        }
+      } else {
+        break;
+      }
+    }
+
+    std::cout << "*==== SYSTEM OPERATION ====* " << __func__
+              << " connected to server at port " << local_server_port
+              << std::endl;
+    // set the socket to non-blocking mode
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags == -1) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " error getting flags for socket" << std::endl;
+      ::close(socket_fd);
+      return -1;
+    }
+
+    if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+      std::cerr << "*==== ERROR ====* " << __func__
+                << " error setting non-blocking mode" << std::endl;
+      ::close(socket_fd);
+      return -1;
+    }
+
+    return socket_fd;
+  }
+
+  void ccf_monitor_thread_func();
+};
 
 void config_set_default(Config &config);
 

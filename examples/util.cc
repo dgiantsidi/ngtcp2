@@ -256,8 +256,7 @@ uint8_t *hexdump16(uint8_t *dest, Span<const uint8_t> data) {
 } // namespace
 
 namespace {
-uint8_t *hexdump_line(uint8_t *dest, Span<const uint8_t> data,
-                      size_t addr) {
+uint8_t *hexdump_line(uint8_t *dest, Span<const uint8_t> data, size_t addr) {
   dest = hexdump_addr(dest, addr);
   *dest++ = ' ';
   *dest++ = ' ';
@@ -770,8 +769,7 @@ std::optional<std::string> read_token(const std::string_view &filename) {
   return read_pem(filename, "token", "QUIC TOKEN");
 }
 
-int write_token(const std::string_view &filename,
-                Span<const uint8_t> token) {
+int write_token(const std::string_view &filename, Span<const uint8_t> token) {
   return write_pem(filename, "token", "QUIC TOKEN", token);
 }
 
