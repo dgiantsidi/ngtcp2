@@ -94,50 +94,49 @@ struct replies pending_replies;
 std::unique_ptr<ccf_monitor> ccf_mon_ptr;
 
 namespace synchronization {
-  std::mutex monitor_mutex;
-  std::condition_variable monitor_cv;
-  void notify_monitor() {
-    std::lock_guard<std::mutex> lock(monitor_mutex);
-    monitor_cv.notify_all();
-  }
-  void wait_monitor() {
-    std::unique_lock<std::mutex> lock(monitor_mutex);
-    monitor_cv.wait(lock);
-  }
+std::mutex monitor_mutex;
+std::condition_variable monitor_cv;
+void notify_monitor() {
+  std::lock_guard<std::mutex> lock(monitor_mutex);
+  monitor_cv.notify_all();
 }
-
+void wait_monitor() {
+  std::unique_lock<std::mutex> lock(monitor_mutex);
+  monitor_cv.wait(lock);
+}
+} // namespace synchronization
 
 void ccf_monitor::ccf_monitor_thread_func() {
-    auto local_endpoint = create_local_endpoint_sender();
-    if (local_endpoint < 0) {
-      assert(0);
-    }
+  auto local_endpoint = create_local_endpoint_sender();
+  if (local_endpoint < 0) {
+    assert(0);
+  }
 
-    std::cout << "*==== MONITOR ====* " << __func__
-              << " Monitor-thread has connected to the handler!" << std::endl;
-    synchronization::wait_monitor();
-    std::cout << "*==== MONITOR ====* " << __func__
-              << " Monitor-thread is starting now!" << std::endl;
-    uint64_t cur_seq_no = 0;
-    while (true) {
-      {
-        std::lock_guard<std::mutex> lock(handle_queue->queue_mutex);
-        if (!handle_queue->response_queue.empty()) {
-          if (srv->cmd_replicated() != cur_seq_no) {
-            cur_seq_no = srv->cmd_replicated();
-            // send to the thread that seqno changed
-            std::cout << "*====NOTIFY====* " << __func__
-                      << ": notifying server-thread about cur_seq_no="
-                      << cur_seq_no << "\n";
-            send(local_endpoint, &cur_seq_no, sizeof(uint64_t), 0);
-          }
+  std::cout << "*==== MONITOR ====* " << __func__
+            << " Monitor-thread has connected to the handler!" << std::endl;
+  synchronization::wait_monitor();
+  std::cout << "*==== MONITOR ====* " << __func__
+            << " Monitor-thread is starting now!" << std::endl;
+  uint64_t cur_seq_no = 0;
+  while (true) {
+    {
+      std::lock_guard<std::mutex> lock(handle_queue->queue_mutex);
+      if (!handle_queue->response_queue.empty()) {
+        if (srv->cmd_replicated() != cur_seq_no) {
+          cur_seq_no = srv->cmd_replicated();
+          // send to the thread that seqno changed
+          std::cout << "*==== NOTIFY ====* " << __func__
+                    << ": notifying server-thread about cur_seq_no="
+                    << cur_seq_no << "\n";
+          send(local_endpoint, &cur_seq_no, sizeof(uint64_t), 0);
         }
       }
-      // @dimitra: this should be replaced by a condition variable from CCF
-      // consensus layer
-      std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
+    // @dimitra: this should be replaced by a condition variable from CCF
+    // consensus layer
+    std::this_thread::sleep_for(std::chrono::microseconds(100000));
   }
+}
 
 namespace {
 constexpr auto NGTCP2_SERVER = "nghttp3/ngtcp2 server"sv;
@@ -637,8 +636,8 @@ int acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id,
 } // namespace
 
 int Handler::acked_stream_data_offset(int64_t stream_id, uint64_t datalen) {
-  std::cout << "*==== EXEC ====* " << __func__ << " stream_id=" << stream_id
-            << "\n";
+  std::cout << "*==== ACKED STREAM DATA ====* " << __func__
+            << " stream_id=" << stream_id << "\n";
   if (!httpconn_) {
     return 0;
   }
@@ -1041,7 +1040,7 @@ int Handler::start_response(Stream *stream, std::unique_ptr<quic_message> msg) {
             << (server()->queue_handle->response_queue.size() + 1) << "\n";
   std::unique_ptr<queue_item> item = std::make_unique<queue_item>();
 
-  // @dimitra: test if this works well
+  // replying immediately works *always* well
   // return stream->start_response(httpconn_, std::move(msg));
 
   item->stream = stream;
@@ -1065,7 +1064,7 @@ int http_acked_stream_data(nghttp3_conn *conn, int64_t stream_id,
 } // namespace
 
 void Handler::http_acked_stream_data(Stream *stream, uint64_t datalen) {
-  std::cout << "*==== EXEC ====* " << __func__ << "\n";
+  std::cout << "*==== HTTP ACKED DATA ====* " << __func__ << "\n";
 
   stream->http_acked_stream_data(datalen);
 
@@ -1079,6 +1078,7 @@ void Handler::http_acked_stream_data(Stream *stream, uint64_t datalen) {
       // TODO Handle error
       std::cerr << "nghttp3_conn_resume_stream: " << nghttp3_strerror(rv)
                 << std::endl;
+      assert(0);
     }
   }
 }
@@ -1534,8 +1534,6 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
   synchronization::notify_monitor();
   return 0;
 }
-
-
 
 int Handler::feed_data(const Endpoint &ep, const Address &local_addr,
                        const sockaddr *sa, socklen_t salen,
@@ -3308,7 +3306,7 @@ void config_set_default(Config &config) {
   config.rx_loss_prob = 0.;
   config.ciphers = util::crypto_default_ciphers();
   config.groups = util::crypto_default_groups();
-  config.timeout = 30 * NGTCP2_SECONDS;
+  config.timeout = 3000 * NGTCP2_SECONDS;
   {
     auto path = realpath(".", nullptr);
     assert(path);
