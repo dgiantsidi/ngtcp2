@@ -46,6 +46,11 @@
 #include <limits>
 #include <charconv>
 
+#include <arpa/inet.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+
 #include "template.h"
 
 using namespace std::literals;
