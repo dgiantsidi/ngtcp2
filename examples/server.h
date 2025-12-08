@@ -47,8 +47,30 @@
 #include "tls_server_context.h"
 #include "network.h"
 #include "shared.h"
-
+#include <queue>
+#include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include "msg_format.h"
+#include <iostream>
 using namespace ngtcp2;
+
+class Handler;
+class Stream;
+
+struct queue_item {
+  Handler *handler;
+  Stream *stream;
+  std::unique_ptr<http_submit_msg_t> request;
+};
+
+struct replies {
+  std::mutex queue_mutex;
+  std::queue<std::unique_ptr<queue_item>> response_queue;
+};
+
+struct replies Q;
 
 struct HTTPHeader {
   HTTPHeader(const std::string_view &name, const std::string_view &value)
@@ -64,11 +86,14 @@ struct FileEntry;
 struct Stream {
   Stream(int64_t stream_id, Handler *handler);
 
-  int start_response(nghttp3_conn *conn);
+  int start_response(nghttp3_conn *conn,
+                     std::unique_ptr<http_reponse_msg_t> request = nullptr);
   std::pair<FileEntry, int> open_file(const std::string &path);
   void map_file(const FileEntry &fe);
-  int send_status_response(nghttp3_conn *conn, unsigned int status_code,
-                           const std::vector<HTTPHeader> &extra_headers = {});
+  int send_status_response(
+    nghttp3_conn *conn, unsigned int status_code,
+    const std::vector<HTTPHeader> &extra_headers = {},
+    std::unique_ptr<http_reponse_msg_t> response = nullptr);
   int send_redirect_response(nghttp3_conn *conn, unsigned int status_code,
                              const std::string_view &path);
   int64_t find_dyn_length(const std::string_view &path);
@@ -91,6 +116,7 @@ struct Stream {
   uint64_t dyndataleft;
   // dynbuflen is the number of bytes in-flight.
   uint64_t dynbuflen;
+  std::string received_data;
 };
 
 class Server;
@@ -118,6 +144,11 @@ public:
               socklen_t salen, const ngtcp2_pkt_info *pi,
               std::span<const uint8_t> data);
   int on_write();
+  int conn_active() {
+    if (conn_ == nullptr)
+      std::cout << __func__ << " conn_ is nullptr" << std::endl;
+    return conn_ != nullptr;
+  }
   int write_streams();
   int feed_data(const Endpoint &ep, const Address &local_addr,
                 const sockaddr *sa, socklen_t salen, const ngtcp2_pkt_info *pi,
@@ -147,6 +178,7 @@ public:
 
   int setup_httpconn();
   void http_consume(int64_t stream_id, size_t nconsumed);
+  void http_consume(int64_t stream_id, const uint8_t *data, size_t nconsumed);
   void extend_max_remote_streams_bidi(uint64_t max_streams);
   Stream *find_stream(int64_t stream_id);
   void http_begin_request_headers(int64_t stream_id);
@@ -154,7 +186,9 @@ public:
                                 nghttp3_rcbuf *name, nghttp3_rcbuf *value);
   int http_end_request_headers(Stream *stream);
   int http_end_stream(Stream *stream);
-  int start_response(Stream *stream);
+  int http_submit_responses(uint64_t ccf_commit_seqno = 0);
+  int start_response(Stream *stream,
+                     std::unique_ptr<http_reponse_msg_t> response = nullptr);
   int on_stream_reset(int64_t stream_id);
   int on_stream_stop_sending(int64_t stream_id);
   int extend_max_stream_data(int64_t stream_id, uint64_t max_data);
@@ -171,15 +205,18 @@ public:
                        std::span<const uint8_t> data, size_t gso_size);
   void start_wev_endpoint(const Endpoint &ep);
   int send_blocked_packet();
+  int handlers_sz();
 
 private:
   struct ev_loop *loop_;
   Server *server_;
   ev_io wev_;
   ev_timer timer_;
+  ev_timer response_timer;
   FILE *qlog_;
   ngtcp2_cid scid_;
   nghttp3_conn *httpconn_;
+
   std::unordered_map<int64_t, std::unique_ptr<Stream>> streams_;
   // conn_closebuf_ contains a packet which contains CONNECTION_CLOSE.
   // This packet is repeatedly sent as a response to the incoming
@@ -261,10 +298,16 @@ public:
   void dissociate_cid(const ngtcp2_cid *cid);
 
   void on_stateless_reset_regen();
+  int create_local_endpoint_receiver();
+  ev_io &get_local_wev_() { return local_wev_; }
+  int &get_local_endpoint() { return local_endpoint; }
+  int handlers_sz() { return handlers_.size(); }
 
 private:
   std::unordered_map<std::string, Handler *, string_hash, std::equal_to<>>
     handlers_;
+  ev_io local_wev_;
+  int local_endpoint = -1;
   struct ev_loop *loop_;
   std::vector<Endpoint> endpoints_;
   TLSServerContext &tls_ctx_;
@@ -272,5 +315,48 @@ private:
   ev_timer stateless_reset_regen_timer_;
   size_t stateless_reset_bucket_;
 };
+
+class ccf_monitor {
+public:
+  ccf_monitor();
+  void notify_quic_server_thread(uint64_t current_seqno);
+  int create_local_endpoint_sender();
+  void thread_func_get_commit_seqno();
+
+private:
+  int quic_server_local_endpoint;
+  std::thread agent_thread;
+};
+
+namespace print_system {
+void log_info(const std::string_view &msg) {
+  // std::cerr << std::this_thread::get_id() << " *==== SYSTEM INFO ====* " <<
+  // msg
+  //          << std::endl;
+}
+
+void log_error(const std::string_view &msg) {
+  // std::cerr << std::this_thread::get_id() << " *==== ERROR ====* " << msg
+  //          << std::endl;
+}
+
+void log_reply(const std::string_view &msg) {
+  // std::cerr << std::this_thread::get_id() << " *==== REPLY ====* " << msg
+  //          << std::endl;
+}
+} // namespace print_system
+
+namespace synchronization {
+std::mutex monitor_mutex;
+std::condition_variable monitor_cv;
+void notify_monitor() {
+  std::lock_guard<std::mutex> lock(monitor_mutex);
+  monitor_cv.notify_all();
+}
+void wait_monitor() {
+  std::unique_lock<std::mutex> lock(monitor_mutex);
+  monitor_cv.wait(lock);
+}
+} // namespace synchronization
 
 #endif // !defined(SERVER_H)

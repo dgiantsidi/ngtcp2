@@ -74,6 +74,9 @@ auto randgen = util::make_mt19937();
 } // namespace
 
 Config config{};
+int64_t qpack_enc_stream_id, qpack_dec_stream_id;
+int64_t ctrl_stream_id;
+std::unique_ptr<ccf_monitor> ccf_monitor_ptr;
 
 Stream::Stream(int64_t stream_id, Handler *handler)
   : stream_id(stream_id),
@@ -89,6 +92,47 @@ constexpr auto NGTCP2_SERVER = "nghttp3/ngtcp2 server"sv;
 } // namespace
 
 namespace {
+std::string make_status_body(unsigned int status_code,
+                             std::unique_ptr<http_reponse_msg_t> response) {
+  auto status_string = util::format_uint(status_code);
+  auto reason_phrase = http::get_reason_phrase(status_code);
+  std::string body;
+  body = status_string;
+  body += reason_phrase;
+  body += "</";
+
+  body = "<html><head><title>";
+  body += status_string;
+  body += " ";
+  body += reason_phrase;
+  body += "</title></head><body>";
+  body += "<h1>";
+  body += status_string;
+  body += " ";
+  body += reason_phrase;
+  body += "</h1><hr>";
+  body +=
+    "<p><strong>Request ID:</strong> " + std::to_string(response->request_id);
+  body += "</p>";
+  body += "<p><strong>ZIL Block ID:</strong> " +
+          std::to_string(response->zil_blk_id) + "</p>";
+  body += "<p><strong>CCF Commit Seqno:</strong> " +
+          std::to_string(response->ccf_commit_seqno) + "</p>";
+  body += "<hr><address>";
+  body += NGTCP2_SERVER;
+  body += " at port ";
+  body += util::format_uint(config.port);
+  body += "</address>";
+  body += "</body></html>";
+
+  print_system::log_info(
+    std::string(__func__) +
+    " request_id=" + std::to_string(response->request_id) +
+    " zil_blk_id=" + std::to_string(response->zil_blk_id) +
+    " ccf_commit_seqno=" + std::to_string(response->ccf_commit_seqno));
+  return body;
+};
+
 std::string make_status_body(unsigned int status_code) {
   auto status_string = util::format_uint(status_code);
   auto reason_phrase = http::get_reason_phrase(status_code);
@@ -108,6 +152,7 @@ std::string make_status_body(unsigned int status_code) {
   body += util::format_uint(config.port);
   body += "</address>";
   body += "</body></html>";
+
   return body;
 }
 } // namespace
@@ -294,6 +339,10 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 
   vec[0].base = stream->data;
   vec[0].len = stream->datalen;
+  print_system::log_info(std::string(__func__) +
+                         " stream_id=" + std::to_string(stream_id) +
+                         " datalen=" + std::to_string(stream->datalen));
+
   *pflags |= NGHTTP3_DATA_FLAG_EOF;
   if (config.send_trailers) {
     *pflags |= NGHTTP3_DATA_FLAG_NO_END_STREAM;
@@ -363,8 +412,12 @@ void Stream::http_acked_stream_data(uint64_t datalen) {
 
 int Stream::send_status_response(nghttp3_conn *httpconn,
                                  unsigned int status_code,
-                                 const std::vector<HTTPHeader> &extra_headers) {
-  status_resp_body = make_status_body(status_code);
+                                 const std::vector<HTTPHeader> &extra_headers,
+                                 std::unique_ptr<http_reponse_msg_t> response) {
+  if (response != nullptr)
+    status_resp_body = make_status_body(status_code, std::move(response));
+  else
+    status_resp_body = make_status_body(status_code);
 
   auto status_code_str = util::format_uint(status_code);
   auto content_length_str = util::format_uint(status_resp_body.size());
@@ -411,7 +464,9 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
   }
 
   handler->shutdown_read(stream_id, NGHTTP3_H3_NO_ERROR);
-
+  // std::cerr << "*==== SYSTEM ====* " << __func__ << " stream_id=" <<
+  // stream_id
+  //          << " response_size=" << status_resp_body.size() << std::endl;
   return 0;
 }
 
@@ -421,8 +476,12 @@ int Stream::send_redirect_response(nghttp3_conn *httpconn,
   return send_status_response(httpconn, status_code, {{"location", path}});
 }
 
-int Stream::start_response(nghttp3_conn *httpconn) {
+int Stream::start_response(nghttp3_conn *httpconn,
+                           std::unique_ptr<http_reponse_msg_t> request) {
   // TODO This should be handled by nghttp3
+  if (method == "PUT")
+    return send_status_response(httpconn, 200, {}, std::move(request));
+
   if (uri.empty() || method.empty()) {
     return send_status_response(httpconn, 400);
   }
@@ -565,6 +624,13 @@ namespace {
 void writecb(struct ev_loop *loop, ev_io *w, int revents) {
   auto h = static_cast<Handler *>(w->data);
   auto s = h->server();
+  std::ostringstream oss;
+  void *handler_ptr = (void *)(h);
+  oss << " handler=" << handler_ptr;
+  std::string log_msg = oss.str();
+
+  print_system::log_info(std::string(__func__) + log_msg);
+  h->conn_active();
 
   switch (h->on_write()) {
   case 0:
@@ -603,6 +669,47 @@ void close_waitcb(struct ev_loop *loop, ev_timer *w, int revents) {
 }
 } // namespace
 
+static std::atomic<bool> started{false};
+static std::atomic<uint64_t> ccf_commit_seqno{0};
+static std::atomic<uint64_t> nb_received_requests{0};
+
+namespace {
+void get_commit_seqno_cb(struct ev_loop *loop, ev_io *w, int revents) {
+  int rv;
+  auto h = static_cast<Handler *>(w->data);
+  size_t n_read = 0;
+  std::unique_ptr<char[]> buf = std::make_unique<char[]>(sizeof(uint64_t));
+  if (revents & EV_READ) {
+    for (;;) {
+      n_read += read(w->fd, (buf.get() + n_read), sizeof(uint64_t) - n_read);
+      if (n_read == sizeof(uint64_t)) {
+        break;
+      }
+      if (n_read < 0) {
+        print_system::log_error(std::string(__func__) + " read error, " +
+                                std::strerror(errno));
+        return;
+      } else if (n_read == 0) {
+        // no more notifications
+        return;
+      }
+    }
+  } else {
+    print_system::log_info(std::string(__func__) + " ev not read");
+    return;
+  }
+
+  uint64_t recved_cmt_seqno;
+  ::memcpy(&recved_cmt_seqno, buf.get(), sizeof(uint64_t));
+  ccf_commit_seqno.store(recved_cmt_seqno);
+  if (h->http_submit_responses(ccf_commit_seqno.load()) > 0) {
+    // ccf_commit_seqno.fetch_add(1);
+    h->signal_write();
+  }
+  return;
+}
+} // namespace
+
 namespace {
 void timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
   int rv;
@@ -638,6 +745,8 @@ fail:
 }
 } // namespace
 
+int Handler::handlers_sz() { return server()->handlers_sz(); }
+
 Handler::Handler(struct ev_loop *loop, Server *server)
   : loop_(loop),
     server_(server),
@@ -668,7 +777,6 @@ Handler::~Handler() {
 
   ev_timer_stop(loop_, &timer_);
   ev_io_stop(loop_, &wev_);
-
   if (httpconn_) {
     nghttp3_conn_del(httpconn_);
   }
@@ -786,7 +894,13 @@ int acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id,
                              uint64_t offset, uint64_t datalen, void *user_data,
                              void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
+
+  print_system::log_info(std::string(__func__) +
+                         " stream_id=" + std::to_string(stream_id) +
+                         " datalen=" + std::to_string(datalen) +
+                         " offset=" + std::to_string(offset));
   if (h->acked_stream_data_offset(stream_id, datalen) != 0) {
+    assert(0);
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
   return 0;
@@ -810,6 +924,8 @@ int Handler::acked_stream_data_offset(int64_t stream_id, uint64_t datalen) {
 
 namespace {
 int stream_open(ngtcp2_conn *conn, int64_t stream_id, void *user_data) {
+  print_system::log_info(std::string(__func__) +
+                         " stream_id=" + std::to_string(stream_id));
   auto h = static_cast<Handler *>(user_data);
   h->on_stream_open(stream_id);
   return 0;
@@ -832,6 +948,9 @@ int stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                  void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
 
+  // std::cerr << "*==== SYSTEM ====* " << __func__ << " stream_id=" <<
+  // stream_id
+  //          << std::endl;
   if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET)) {
     app_error_code = NGHTTP3_H3_NO_ERROR;
   }
@@ -847,6 +966,8 @@ namespace {
 int stream_reset(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
                  uint64_t app_error_code, void *user_data,
                  void *stream_user_data) {
+  std::cerr << "*==== SYSTEM ====* " << __func__ << " stream_id=" << stream_id
+            << std::endl;
   auto h = static_cast<Handler *>(user_data);
   if (h->on_stream_reset(stream_id) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1015,7 +1136,7 @@ int http_recv_data(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
     debug::print_http_data(stream_id, {data, datalen});
   }
   auto h = static_cast<Handler *>(user_data);
-  h->http_consume(stream_id, datalen);
+  h->http_consume(stream_id, data, datalen);
   return 0;
 }
 } // namespace
@@ -1033,6 +1154,16 @@ int http_deferred_consume(nghttp3_conn *conn, int64_t stream_id,
 void Handler::http_consume(int64_t stream_id, size_t nconsumed) {
   ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
   ngtcp2_conn_extend_max_offset(conn_, nconsumed);
+}
+
+void Handler::http_consume(int64_t stream_id, const uint8_t *data,
+                           size_t nconsumed) {
+  ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
+  ngtcp2_conn_extend_max_offset(conn_, nconsumed);
+  auto it = streams_.find(stream_id);
+  assert(it != std::end(streams_));
+  auto &stream = (*it).second;
+  stream->received_data.append(reinterpret_cast<const char *>(data), nconsumed);
 }
 
 namespace {
@@ -1064,7 +1195,8 @@ int http_recv_request_header(nghttp3_conn *conn, int64_t stream_id,
   if (!config.quiet) {
     debug::print_http_header(stream_id, name, value, flags);
   }
-
+  print_system::log_info(std::string(__func__) +
+                         " stream_id=" + std::to_string(stream_id));
   auto h = static_cast<Handler *>(user_data);
   auto stream = static_cast<Stream *>(stream_user_data);
   h->http_recv_request_header(stream, token, name, value);
@@ -1093,6 +1225,9 @@ void Handler::http_recv_request_header(Stream *stream, int32_t token,
 namespace {
 int http_end_request_headers(nghttp3_conn *conn, int64_t stream_id, int fin,
                              void *user_data, void *stream_user_data) {
+  print_system::log_info(std::string(__func__) +
+                         " stream_id=" + std::to_string(stream_id) +
+                         " fin=" + std::to_string(fin));
   if (!config.quiet) {
     debug::print_http_end_headers(stream_id);
   }
@@ -1129,15 +1264,121 @@ int http_end_stream(nghttp3_conn *conn, int64_t stream_id, void *user_data,
 }
 } // namespace
 
+static bool special_stream(int64_t stream_id) {
+  if (stream_id == ctrl_stream_id || stream_id == qpack_enc_stream_id ||
+      stream_id == qpack_dec_stream_id) {
+    return true;
+  }
+  return false;
+}
+
+int Handler::http_submit_responses(uint64_t _ccf_commit_seqno) {
+  std::lock_guard<std::mutex> lock(Q.queue_mutex);
+  while (!Q.response_queue.empty()) {
+    auto &item = Q.response_queue.front();
+    void *handler_ptr = (void *)(this);
+
+    std::ostringstream oss;
+    oss << " handler=" << handler_ptr;
+    std::string log_msg = oss.str();
+
+    print_system::log_reply(
+      std::string(__func__) +
+      " stream_id=" + std::to_string(item->stream->stream_id) +
+      " commit_seqno=" + std::to_string(_ccf_commit_seqno) +
+      " request_id=" + std::to_string(item->request->request_id) +
+      " zil_block_id=" + std::to_string(item->request->zil_blk_id) +
+      " Q.response_queue.size=" + std::to_string(Q.response_queue.size()) +
+      log_msg);
+#if 0
+    std::cout << "*==== SYSTEM ====* " << __func__
+              << " stream_id=" << item->stream->stream_id
+              << " commit_seqno=" << _ccf_commit_seqno
+              << " request_id=" << item->request->request_id
+              << " Q.response_queue.size=" << Q.response_queue.size()
+              << log_msg 
+              << " handlers_.size=" << handlers_sz()
+              << std::endl;
+#endif
+    // print_system::log_reply("handlers_.size=" +
+    // std::to_string(handlers_sz()));
+
+#if 1
+    auto req_latency =
+      util::timestamp() - item->request->ts; // this is in nanoseconds
+    if (req_latency < 300000) {
+      return 0;
+    }
+    std::cout << "*==== SYSTEM ====* " << __func__
+              << " stream_id=" << item->stream->stream_id
+              << " commit_seqno=" << _ccf_commit_seqno
+              << " request_id=" << item->request->request_id
+              << " req_latency=" << req_latency
+              << " Q.response_queue.size=" << Q.response_queue.size() << log_msg
+              << std::endl;
+
+    // if (item->request->request_id > ccf_commit_seqno) {
+    // wait for next notification
+    // return 0;
+    // }
+#endif
+    std::unique_ptr<http_reponse_msg_t> response_msg =
+      std::make_unique<http_reponse_msg_t>();
+    response_msg->request_id = item->request->request_id;
+    response_msg->zil_blk_id = item->request->zil_blk_id;
+    response_msg->ccf_commit_seqno = _ccf_commit_seqno;
+    if (start_response(item->stream, std::move(response_msg)) != 0) {
+      Q.response_queue.pop();
+      return -1;
+    }
+    Q.response_queue.pop();
+    // return 1;
+  }
+  return 1;
+}
+
 int Handler::http_end_stream(Stream *stream) {
   if (!config.early_response) {
-    return start_response(stream);
+    // return start_response(stream);
+    static int count = 0;
+    static int request_counter = 1;
+    count++;
+    std::ostringstream oss;
+    oss << " handler=" << this;
+    std::string log_msg = oss.str();
+    print_system::log_info(
+      std::string(__func__) +
+      " stream_id=" + std::to_string(stream->stream_id) +
+      " received_data.size=" + std::to_string(stream->received_data.size()) +
+      " count=" + std::to_string(count) + log_msg);
+
+    if (count < 5 && special_stream(stream->stream_id)) {
+      return start_response(stream);
+    }
+
+    auto item = std::make_unique<queue_item>();
+    item->stream = stream;
+    item->handler = this;
+    item->request = std::make_unique<http_submit_msg_t>();
+    item->request->request_id = request_counter;
+    item->request->ts = util::timestamp();
+    request_counter++;
+    nb_received_requests.fetch_add(1);
+    if (stream->received_data.size() > 0) {
+      auto &id = stream->received_data;
+      item->request->zil_blk_id = std::stoll(id);
+    } else
+      item->request->zil_blk_id = 0;
+    std::lock_guard<std::mutex> lock(Q.queue_mutex);
+    Q.response_queue.push(std::move(item));
+    started.store(true);
   }
   return 0;
 }
 
-int Handler::start_response(Stream *stream) {
-  return stream->start_response(httpconn_);
+int Handler::start_response(Stream *stream,
+                            std::unique_ptr<http_reponse_msg_t> response_msg) {
+  return stream->start_response(httpconn_, std::move(response_msg));
 }
 
 namespace {
@@ -1185,7 +1426,7 @@ void Handler::http_stream_close(int64_t stream_id, uint64_t app_error_code) {
   }
 
   if (!config.quiet) {
-    std::cerr << "HTTP stream " << stream_id << " closed with error code "
+    std::cout << "HTTP stream " << stream_id << " closed with error code "
               << app_error_code << std::endl;
   }
 
@@ -1298,8 +1539,6 @@ int Handler::setup_httpconn() {
   nghttp3_conn_set_max_client_streams_bidi(httpconn_,
                                            params->initial_max_streams_bidi);
 
-  int64_t ctrl_stream_id;
-
   if (auto rv = ngtcp2_conn_open_uni_stream(conn_, &ctrl_stream_id, nullptr);
       rv != 0) {
     std::cerr << "ngtcp2_conn_open_uni_stream: " << ngtcp2_strerror(rv)
@@ -1317,8 +1556,6 @@ int Handler::setup_httpconn() {
   if (!config.quiet) {
     fprintf(stderr, "http: control stream=%" PRIx64 "\n", ctrl_stream_id);
   }
-
-  int64_t qpack_enc_stream_id, qpack_dec_stream_id;
 
   if (auto rv =
         ngtcp2_conn_open_uni_stream(conn_, &qpack_enc_stream_id, nullptr);
@@ -1349,7 +1586,11 @@ int Handler::setup_httpconn() {
             "http: QPACK streams encoder=%" PRIx64 " decoder=%" PRIx64 "\n",
             qpack_enc_stream_id, qpack_dec_stream_id);
   }
-
+  print_system::log_info(
+    std::string(__func__) +
+    " ctrl_stream_id=" + std::to_string(ctrl_stream_id) +
+    " qpack_enc_stream_id=" + std::to_string(qpack_enc_stream_id) +
+    " qpack_dec_stream_id=" + std::to_string(qpack_dec_stream_id));
   return 0;
 }
 
@@ -1408,6 +1649,7 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
                   const ngtcp2_cid *scid, const ngtcp2_cid *ocid,
                   std::span<const uint8_t> token, ngtcp2_token_type token_type,
                   uint32_t version, TLSServerContext &tls_ctx) {
+  std::cout << __PRETTY_FUNCTION__ << std::endl;
   auto callbacks = ngtcp2_callbacks{
     .recv_client_initial = ngtcp2_crypto_recv_client_initial_cb,
     .recv_crypto_data = ::recv_crypto_data,
@@ -1587,7 +1829,11 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
   ngtcp2_conn_set_tls_native_handle(conn_, tls_session_.get_native_handle());
 
   ev_io_set(&wev_, ep.fd, EV_WRITE);
-
+  ev_io_init(&(server()->get_local_wev_()), get_commit_seqno_cb,
+             server()->get_local_endpoint(), EV_READ);
+  server()->get_local_wev_().data = this;
+  ev_io_start(loop_, &(server()->get_local_wev_()));
+  // synchronization::notify_monitor();
   return 0;
 }
 
@@ -1665,6 +1911,8 @@ int Handler::handle_expiry() {
 int Handler::on_write() {
   if (ngtcp2_conn_in_closing_period(conn_) ||
       ngtcp2_conn_in_draining_period(conn_)) {
+    std::cerr << "Connection is closing or draining, skip sending packets"
+              << std::endl;
     return 0;
   }
 
@@ -1679,7 +1927,14 @@ int Handler::on_write() {
   }
 
   ev_io_stop(loop_, &wev_);
-
+  print_system::log_info(std::string(__func__) +
+                         " ev_io_stop fd=" + std::to_string(wev_.fd));
+#if 0
+  int rv = http_submit_responses(ccf_commit_seqno.load());
+  if (rv != 0)
+    print_system::log_error(std::string(__func__) +
+                            " http_submit_responses rv=" + std::to_string(rv));
+#endif
   if (auto rv = write_streams(); rv != 0) {
     return rv;
   }
@@ -1723,6 +1978,9 @@ int Handler::write_streams() {
           0);
         return handle_error();
       }
+      print_system::log_info(
+        std::string(__func__) + " stream_id=" + std::to_string(stream_id) +
+        " fin=" + std::to_string(fin) + " sveccnt=" + std::to_string(sveccnt));
     }
 
     ngtcp2_ssize ndatalen;
@@ -1733,7 +1991,9 @@ int Handler::write_streams() {
     if (fin) {
       flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
     }
-
+    print_system::log_info(std::string(__func__) +
+                           " stream_id=" + std::to_string(stream_id) +
+                           " fin=" + std::to_string(fin));
     auto buflen = buf.size() >= max_udp_payload_size
                     ? max_udp_payload_size
                     : path_max_udp_payload_size;
@@ -1741,17 +2001,30 @@ int Handler::write_streams() {
     auto nwrite = ngtcp2_conn_writev_stream(
       conn_, &ps.path, &pi, buf.data(), buflen, &ndatalen, flags, stream_id,
       reinterpret_cast<const ngtcp2_vec *>(v), vcnt, ts);
+    print_system::log_info(
+      std::string(__func__) + " stream_id=" + std::to_string(stream_id) +
+      " flags=" + std::to_string((flags && NGTCP2_WRITE_STREAM_FLAG_FIN)) +
+      " nwrite=" + std::to_string(nwrite));
     if (nwrite < 0) {
       switch (nwrite) {
       case NGTCP2_ERR_STREAM_DATA_BLOCKED:
+        print_system::log_info(std::string(__func__) +
+                               " stream_id=" + std::to_string(stream_id) +
+                               " NGTCP2_ERR_STREAM_DATA_BLOCKED");
         assert(ndatalen == -1);
         nghttp3_conn_block_stream(httpconn_, stream_id);
         continue;
       case NGTCP2_ERR_STREAM_SHUT_WR:
+        print_system::log_info(std::string(__func__) +
+                               " stream_id=" + std::to_string(stream_id) +
+                               " NGTCP2_ERR_STREAM_SHUT_WR");
         assert(ndatalen == -1);
         nghttp3_conn_shutdown_stream_write(httpconn_, stream_id);
         continue;
       case NGTCP2_ERR_WRITE_MORE:
+        print_system::log_info(std::string(__func__) +
+                               " stream_id=" + std::to_string(stream_id) +
+                               " NGTCP2_ERR_WRITE_MORE");
         assert(ndatalen >= 0);
         if (auto rv =
               nghttp3_conn_add_write_offset(httpconn_, stream_id, ndatalen);
@@ -1773,6 +2046,9 @@ int Handler::write_streams() {
       ngtcp2_ccerr_set_liberr(&last_error_, nwrite, nullptr, 0);
       return handle_error();
     } else if (ndatalen >= 0) {
+      print_system::log_info(std::string(__func__) +
+                             " stream_id=" + std::to_string(stream_id) +
+                             " ndatalen=" + std::to_string(ndatalen));
       if (auto rv =
             nghttp3_conn_add_write_offset(httpconn_, stream_id, ndatalen);
           rv != 0) {
@@ -1793,6 +2069,9 @@ int Handler::write_streams() {
               ep, no_gso_, prev_ps.path.local, prev_ps.path.remote, prev_ecn,
               data, gso_size);
             rv != NETWORK_ERR_OK) {
+          print_system::log_info(
+            std::string(__func__) + " stream_id=" + std::to_string(stream_id) +
+            " send_packet blocked (NETWORK_ERR_SEND_BLOCKED)");
           assert(NETWORK_ERR_SEND_BLOCKED == rv);
 
           on_send_blocked(ep, prev_ps.path.local, prev_ps.path.remote, prev_ecn,
@@ -1803,6 +2082,8 @@ int Handler::write_streams() {
       }
 
       // We are congestion limited.
+      print_system::log_info(std::string(__func__) + " stream_id=" +
+                             std::to_string(stream_id) + " congestion limited");
       ngtcp2_conn_update_pkt_tx_time(conn_, ts);
       return 0;
     }
@@ -1913,7 +2194,8 @@ void Handler::start_wev_endpoint(const Endpoint &ep) {
 
     ev_io_set(&wev_, ep.fd, EV_WRITE);
   }
-
+  print_system::log_info(std::string(__func__) +
+                         " fd=" + std::to_string(wev_.fd));
   ev_io_start(loop_, &wev_);
 }
 
@@ -1952,7 +2234,11 @@ int Handler::send_blocked_packet() {
   return 0;
 }
 
-void Handler::signal_write() { ev_io_start(loop_, &wev_); }
+void Handler::signal_write() {
+  print_system::log_info(std::string(__func__) +
+                         " ev_io_start fd=" + std::to_string(wev_.fd));
+  ev_io_start(loop_, &wev_);
+}
 
 void Handler::start_draining_period() {
   ev_io_stop(loop_, &wev_);
@@ -2086,11 +2372,16 @@ int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
     nghttp3_conn_read_stream(httpconn_, stream_id, data.data(), data.size(),
                              flags & NGTCP2_STREAM_DATA_FLAG_FIN);
   if (nconsumed < 0) {
-    std::cerr << "nghttp3_conn_read_stream: " << nghttp3_strerror(nconsumed)
+    std::cerr << "stream_id=" << stream_id
+              << " nghttp3_conn_read_stream: " << nghttp3_strerror(nconsumed)
+              << std::endl;
+    std::cerr << "stream_id=" << stream_id
+              << " nghttp3_conn_read_stream: " << nghttp3_strerror(nconsumed)
               << std::endl;
     ngtcp2_ccerr_set_application_error(
       &last_error_, nghttp3_err_infer_quic_app_error_code(nconsumed), nullptr,
       0);
+    exit(EXIT_FAILURE);
     return -1;
   }
 
@@ -2137,7 +2428,7 @@ Server *Handler::server() const { return server_; }
 
 int Handler::on_stream_close(int64_t stream_id, uint64_t app_error_code) {
   if (!config.quiet) {
-    std::cerr << "QUIC stream " << stream_id << " closed" << std::endl;
+    std::cout << "QUIC stream " << stream_id << " closed" << std::endl;
   }
 
   if (httpconn_) {
@@ -2167,7 +2458,15 @@ int Handler::on_stream_close(int64_t stream_id, uint64_t app_error_code) {
 }
 
 void Handler::shutdown_read(int64_t stream_id, int app_error_code) {
-  ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
+  // ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
+  std::cerr << " SHUTDOWN stream_id=" << stream_id << "\n";
+  auto rv =
+    ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
+  if (rv != 0) {
+    std::cerr << "ngtcp2_conn_shutdown_stream: " << ngtcp2_strerror(rv)
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
 }
 
 namespace {
@@ -2199,6 +2498,77 @@ Server::Server(struct ev_loop *loop, TLSServerContext &tls_ctx)
     },
     0., 1.);
   stateless_reset_regen_timer_.data = this;
+
+  local_endpoint = create_local_endpoint_receiver();
+  if (local_endpoint < 0) {
+    print_system::log_error(std::string(__func__) + " " + std::strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  // ev_io_init(&local_wev_, get_commit_seqno_cb, local_endpoint, EV_READ);
+  // local_wev_.data = this;
+  // ev_io_start(loop_, &local_wev_);
+}
+
+int Server::create_local_endpoint_receiver() {
+  auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd < 0) {
+    print_system::log_error("socket creation failed");
+    return -1;
+  }
+
+  sockaddr_in server_addr{};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;          // listen on all interfaces
+  server_addr.sin_port = htons(k_local_server_port); // port number
+
+  if (bind(server_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    std::string print_msg =
+      std::string(std::string(__func__)) + " could not bind to port " +
+      std::to_string(k_local_server_port) + ", Error=" + std::strerror(errno);
+    print_system::log_error(print_msg);
+    ::close(server_fd);
+    return -1;
+  }
+
+  if (listen(server_fd, 5) < 0) {
+    std::string print_msg =
+      std::string(std::string(__func__)) + " could not listen on port " +
+      std::to_string(k_local_server_port) + ", Error=" + std::strerror(errno);
+    print_system::log_error(print_msg);
+    ::close(server_fd);
+    return -1;
+  }
+
+  print_system::log_info(
+    "Local endpoint on receiver userspace side created successfully.");
+
+  sockaddr_in client_addr{};
+  socklen_t client_len = sizeof(client_addr);
+  int accepted_socket =
+    accept(server_fd, (sockaddr *)&client_addr, &client_len);
+  if (accepted_socket < 0) {
+    std::string print_msg = std::string(std::string(__func__)) +
+                            " could not accept connection on port " +
+                            std::to_string(k_local_server_port) +
+                            ", Error=" + std::strerror(errno);
+    print_system::log_error(print_msg);
+
+    ::close(server_fd);
+    return -1;
+  }
+
+  // set the socket to non-blocking mode
+  int flags = fcntl(accepted_socket, F_GETFL, 0);
+  if (flags == -1) {
+    ::close(accepted_socket);
+    return -1;
+  }
+
+  if (fcntl(accepted_socket, F_SETFL, flags | O_NONBLOCK) == -1) {
+    ::close(accepted_socket);
+    return -1;
+  }
+  return accepted_socket;
 }
 
 Server::~Server() {
@@ -2444,6 +2814,8 @@ int Server::on_read(Endpoint &ep) {
     .iov_len = buf.size(),
   };
 
+  print_system::log_info(std::string(__func__) +
+                         " fd=" + std::to_string(ep.fd));
   uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(in6_pktinfo)) +
                    CMSG_SPACE(sizeof(int))];
 
@@ -2469,7 +2841,9 @@ int Server::on_read(Endpoint &ep) {
     // Packets less than 22 bytes never be a valid QUIC packet.
     if (nread < 22) {
       ++pktcnt;
-
+      print_system::log_info(
+        std::string(__func__) +
+        " Ignored short packet length=" + std::to_string(nread));
       continue;
     }
 
@@ -2538,7 +2912,7 @@ void Server::read_pkt(Endpoint &ep, const Address &local_addr,
                       const ngtcp2_pkt_info *pi,
                       std::span<const uint8_t> data) {
   ngtcp2_version_cid vc;
-
+  print_system::log_info(std::string(__func__));
   switch (auto rv = ngtcp2_pkt_decode_version_cid(&vc, data.data(), data.size(),
                                                   NGTCP2_SV_SCIDLEN);
           rv) {
@@ -2671,7 +3045,6 @@ void Server::read_pkt(Endpoint &ep, const Address &local_addr,
     for (size_t i = 0; i < num_scid; ++i) {
       associate_cid(&scids[i], h.get());
     }
-
     handlers_.emplace(dcid_key, h.release());
 
     return;
@@ -2680,6 +3053,8 @@ void Server::read_pkt(Endpoint &ep, const Address &local_addr,
   auto h = (*handler_it).second;
   auto conn = h->conn();
   if (ngtcp2_conn_in_closing_period(conn)) {
+    print_system::log_info(std::string(__func__) +
+                           " Connection in closing period");
     // TODO do exponential backoff.
     if (h->send_conn_close() != 0) {
       remove(h);
@@ -2687,11 +3062,15 @@ void Server::read_pkt(Endpoint &ep, const Address &local_addr,
     return;
   }
   if (ngtcp2_conn_in_draining_period(conn)) {
+    print_system::log_info(std::string(__func__) +
+                           " Connection in draining period");
     return;
   }
 
   if (auto rv = h->on_read(ep, local_addr, sa, salen, pi, data); rv != 0) {
     if (rv != NETWORK_ERR_CLOSE_WAIT) {
+      print_system::log_info(std::string(__func__) +
+                             " on_read failed: " + std::to_string(rv));
       remove(h);
     }
     return;
@@ -3072,6 +3451,7 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
       auto [_, rv] = send_packet(ep, no_gso, local_addr, remote_addr, ecn,
                                  {std::begin(data), len}, len);
       if (rv != 0) {
+        print_system::log_info(std::string(__func__) + "  rv!=0");
         return {data, rv};
       }
 
@@ -3223,6 +3603,7 @@ void Server::dissociate_cid(const ngtcp2_cid *cid) {
 }
 
 void Server::remove(const Handler *h) {
+  print_system::log_info(" Server removes handler ...\n");
   auto conn = h->conn();
 
   dissociate_cid(ngtcp2_conn_get_client_initial_dcid(conn));
@@ -3353,7 +3734,7 @@ void print_help() {
 
   config_set_default(config);
 
-  std::cout << R"(
+  std::cerr << R"(
   <ADDR>      Address to listen to.  '*' binds to any address.
   <PORT>      Port
   <PRIVATE_KEY_FILE>
@@ -3528,11 +3909,98 @@ Options:
 }
 } // namespace
 
+ccf_monitor::ccf_monitor() {
+  print_system::log_info("Starting ccf_monitor thread.");
+  agent_thread = std::thread(&ccf_monitor::thread_func_get_commit_seqno, this);
+}
+
+void ccf_monitor::notify_quic_server_thread(uint64_t current_seqno) {
+  send(quic_server_local_endpoint, &current_seqno, sizeof(uint64_t), 0);
+}
+
+int ccf_monitor::create_local_endpoint_sender() {
+  int sender_socket = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+  if (sender_socket < 0) {
+    print_system::log_error("socket creation failed");
+    return -1;
+  }
+
+  sockaddr_in server_addr{};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(k_local_server_port); // port number
+
+  // convert IP address from text to binary
+  if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
+    ::close(sender_socket);
+    return -1;
+  }
+  int connect_tries = 0;
+  for (;;) {
+    // connect to the server
+    if (connect(sender_socket, (sockaddr *)&server_addr, sizeof(server_addr)) <
+        0) {
+      print_system::log_error(
+        "Connection to local endpoint failed, retrying...");
+      connect_tries++;
+      std::this_thread::sleep_for(std::chrono::seconds(3));
+      if (connect_tries > 1000) {
+        ::close(sender_socket);
+        return -1;
+      }
+    } else {
+      break;
+    }
+  }
+
+  // set the socket to non-blocking mode
+  int flags = fcntl(sender_socket, F_GETFL, 0);
+  if (flags == -1) {
+    ::close(sender_socket);
+    return -1;
+  }
+
+  if (fcntl(sender_socket, F_SETFL, flags | O_NONBLOCK) == -1) {
+    ::close(sender_socket);
+    return -1;
+  }
+  print_system::log_info("Connected to local endpoint suceeded.");
+  return sender_socket;
+}
+
+void ccf_monitor::thread_func_get_commit_seqno() {
+  quic_server_local_endpoint = create_local_endpoint_sender();
+  // synchronization::wait_monitor();
+  uint64_t current_seqno = 0;
+  while (true) {
+    {
+      print_system::log_info(
+        " send commit_seqno=" + std::to_string(current_seqno) +
+        " to local endpoint");
+
+      // @dimitra: this should be replaced by a condition variable from CCF
+      // consensus layer
+
+      // size_t qsize = 0;
+      // {
+      //   std::lock_guard<std::mutex> lock(Q.queue_mutex);
+      //   qsize = Q.response_queue.size();
+      // }
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+      notify_quic_server_thread(current_seqno);
+      ccf_commit_seqno.fetch_add(rand() % 100 + 1);
+      current_seqno = ccf_commit_seqno.load();
+      // print_system::log_info(
+      //  " send commit_seqno=" + std::to_string(current_seqno) +
+      //  " to local endpoint");
+    }
+  }
+}
+
 std::ofstream keylog_file;
 
 int main(int argc, char **argv) {
   config_set_default(config);
-
+  ccf_monitor_ptr = std::make_unique<ccf_monitor>();
   if (argc) {
     prog = basename(argv[0]);
   }
@@ -3935,6 +4403,11 @@ int main(int argc, char **argv) {
     };
   }
 
+  if (config.early_response) {
+    print_system::log_error(
+      "Early response is enabled, which is not supported in this build.");
+    exit(EXIT_FAILURE);
+  }
   if (argc - optind < 4) {
     std::cerr << "Too few arguments" << std::endl;
     print_usage();

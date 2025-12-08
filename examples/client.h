@@ -48,8 +48,23 @@
 #include "network.h"
 #include "shared.h"
 #include "template.h"
+#include <thread>
+#include "/home/azureuser/genltest/prototype/config_c.h"
+#include "/home/azureuser/genltest/prototype/msg_processing_functions.h"
+#include "/home/azureuser/genltest/prototype/fifo_queue.hpp"
 
 using namespace ngtcp2;
+
+using exp_distribution = std::vector<int>;
+using uni_distribution = std::vector<int>;
+using normal_distribution = std::vector<int>;
+
+const int n_samples = 1000;
+const int min_us = 2;     // 2 microseconds
+const int max_us = 10000; // 10 milliseconds = 10,000 microseconds
+fifo_queue<recv_cmt_msg_t *> recv_queue;
+
+constexpr int k_local_server_port = 12345;
 
 struct Stream {
   Stream(const Request &req, int64_t stream_id);
@@ -60,8 +75,11 @@ struct Stream {
   Request req;
   int64_t stream_id;
   int fd;
+  std::string received_data;
+  std::string sent_data;
+  ngtcp2_tstamp transmittion_timestamp; // in nanoseconds
 };
-
+std::map<int64_t, std::unique_ptr<Stream>> streams_;
 class Client;
 
 struct Endpoint {
@@ -111,6 +129,7 @@ public:
   int initiate_key_update();
   void start_key_update_timer();
   void start_delay_stream_timer();
+  void notify_kernel(const char *poolname, const uint64_t zil_blk_id);
 
   int select_preferred_address(Address &selected_addr,
                                const ngtcp2_preferred_addr *paddr);
@@ -121,6 +140,7 @@ public:
 
   int setup_httpconn();
   int submit_http_request(const Stream *stream);
+  int http_end_stream(int64_t stream_id);
   int recv_stream_data(uint32_t flags, int64_t stream_id,
                        std::span<const uint8_t> data);
   int acked_stream_data_offset(int64_t stream_id, uint64_t datalen);
@@ -138,25 +158,28 @@ public:
                        size_t gso_size);
   void start_wev_endpoint(const Endpoint &ep);
   int send_blocked_packet();
-
+  void create_socket_kernel();
   const std::vector<uint32_t> &get_offered_versions() const;
-
+  void shutdown_write(int64_t stream_id, uint64_t app_error_code);
   bool get_early_data() const;
   void early_data_rejected();
 
   bool should_exit() const;
+  int create_local_endpoint_receiver_userspace();
 
 private:
   std::vector<Endpoint> endpoints_;
   Address remote_addr_;
   ev_io wev_;
+  ev_io local_wev_;
   ev_timer timer_;
+  ev_timer requests_timer;
   ev_timer change_local_addr_timer_;
   ev_timer key_update_timer_;
   ev_timer delay_stream_timer_;
   ev_signal sigintev_;
   struct ev_loop *loop_;
-  std::map<int64_t, std::unique_ptr<Stream>> streams_;
+  /// std::map<int64_t, std::unique_ptr<Stream>> streams_;
   std::vector<uint32_t> offered_versions_;
   nghttp3_conn *httpconn_;
   // addr_ is the server host address.
@@ -177,6 +200,8 @@ private:
   // confirmed.
   bool handshake_confirmed_;
   bool no_gso_;
+  int kernel_socket =
+    -1; // kernel_socket for sending data, e.g., notifications about cmts
 
   struct {
     bool send_blocked;
@@ -193,5 +218,44 @@ private:
     std::array<uint8_t, 64_k> data;
   } tx_;
 };
+
+class shared_cmts_queue {
+public:
+private:
+};
+
+class zfs_userspace_client {
+public:
+  zfs_userspace_client(void *poolnam);
+  void notify_quic_client_thread(const int local_socket);
+  int create_local_endpoint_sender_userspace();
+
+  void create_local_endpoint_kernelspace() {};
+
+  void thread_func_get_cmt(void *args_poolname);
+  void get_commitment(
+    int kernel_endpoint, const char *poolname,
+    std::tuple<exp_distribution, uni_distribution, normal_distribution>
+      distributions);
+  int create_local_endpoint_receiver_kernelspace();
+
+private:
+  int quic_client_local_endpoint;
+  std::thread agent_thread;
+};
+
+namespace print_system {
+void log_info(const std::string_view &msg) {
+  // std::cout << "*==== SYSTEM INFO ====* " << msg << std::endl;
+}
+
+void log(const std::string_view &msg) {
+  std::cout << "*==== INFO ====* " << msg << std::endl;
+}
+
+void log_error(const std::string_view &msg) {
+  // std::cerr << "*==== ERROR ====* " << msg << std::endl;
+}
+} // namespace print_system
 
 #endif // !defined(CLIENT_H)
