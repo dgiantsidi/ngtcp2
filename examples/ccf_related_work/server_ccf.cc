@@ -1272,6 +1272,7 @@ static bool special_stream(int64_t stream_id) {
 }
 
 int Handler::http_submit_responses(uint64_t ccf_commit_seqno) {
+  static uint64_t avg_latency = 0;
   std::lock_guard<std::mutex> lock(Q.queue_mutex);
   while (!Q.response_queue.empty()) {
     auto &item = Q.response_queue.front();
@@ -1292,12 +1293,16 @@ int Handler::http_submit_responses(uint64_t ccf_commit_seqno) {
       Q.response_queue.pop();
       return -1;
     }
+    avg_latency += (util::timestamp() - item->request->ts);
     if (item->request->request_id % 10000 == 0)
      print_system::log_reply(
       std::string(__func__) +
       " stream_id=" + std::to_string(item->stream->stream_id) +
       " commit_seqno=" + std::to_string(ccf_commit_seqno) +
       " request_id=" + std::to_string(item->request->request_id) +
+      " zil_blk_id=" + std::to_string(item->request->zil_blk_id) +
+      " replication_latency=" +  std::to_string(util::timestamp() - item->request->ts) +
+      " avg_replication_latency=" + std::to_string(avg_latency / item->request->request_id) +
       " Q.response_queue.size=" + std::to_string(Q.response_queue.size()));
     Q.response_queue.pop();
   }
@@ -1330,8 +1335,11 @@ int Handler::http_end_stream(Stream *stream) {
     request_counter++;
 
     if (stream->received_data.size() > 0) {
-      auto &id_str = stream->received_data;
-      item->request->zil_blk_id = std::stoll(id_str);
+      //auto &id_str = stream->received_data;
+      //item->request->zil_blk_id = std::stoll(id_str);
+      uint64_t zil_blk_id = 2;
+      ::memcpy(&zil_blk_id, stream->received_data.data(), sizeof(uint64_t));
+      item->request->zil_blk_id = zil_blk_id;
     } else {
       item->request->zil_blk_id = 0;
     }
