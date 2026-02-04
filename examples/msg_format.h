@@ -1,5 +1,5 @@
 constexpr size_t ZFS_MAX_DATASET_NAME_LEN = 256;
-constexpr int k_local_server_port = 12345;
+constexpr int k_local_server_port = 7000;
 
 // body of message format for HTTP/3
 struct http_submit_msg {
