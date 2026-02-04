@@ -1,0 +1,1 @@
+avg_replication_latency=391396
