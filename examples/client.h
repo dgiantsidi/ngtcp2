@@ -60,8 +60,8 @@ using uni_distribution = std::vector<int>;
 using normal_distribution = std::vector<int>;
 
 const int n_samples = 1000;
-const int min_us = 2;     // 2 microseconds
-const int max_us = 10000; // 10 milliseconds = 10,000 microseconds
+const int min_us = 2000;     // 1 millisecond
+const int max_us = 1000000; // 1000 milliseconds = 1000,000 microseconds = 1 second
 fifo_queue<recv_cmt_msg_t *> recv_queue;
 
 constexpr int k_local_server_port = 12345;

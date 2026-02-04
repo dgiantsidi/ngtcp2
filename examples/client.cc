@@ -54,6 +54,9 @@
 using namespace ngtcp2;
 using namespace std::literals;
 
+static double sum_latency_ms = 0;
+static uint64_t global_start_time_ns = 0;
+
 std::tuple<exp_distribution, uni_distribution, normal_distribution>
 construct_distribution(const int min_us, const int max_us,
                        const int n_samples) {
@@ -215,9 +218,11 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
     if (n < 0) {
       print_system::log_error(
         "Error reading notification from local endpoint.");
+      std::cout << "Error reading notification from local endpoint.\n";
       return;
     } else if (n == 0) {
       // no more notifications
+      std::cout << "No more notifications from local endpoint.\n";
       return;
     }
   }
@@ -306,6 +311,8 @@ Client::Client(struct ev_loop *loop, uint32_t client_chosen_version,
   ev_timer_start(loop, &requests_timer);
 #endif
   int local_endpoint = create_local_endpoint_receiver_userspace();
+  if (local_endpoint < 0)
+    return;
   ev_io_init(&local_wev_, get_notification_cb, local_endpoint, EV_READ);
   local_wev_.data = this;
   ev_io_start(loop_, &local_wev_);
@@ -1966,20 +1973,21 @@ int Client::make_stream_early() {
 }
 
 int Client::on_extend_max_streams() {
+  //std::this_thread::sleep_for(std::chrono::milliseconds(10));
   int64_t stream_id;
 
   if ((config.delay_stream && !handshake_confirmed_) ||
       ev_is_active(&delay_stream_timer_)) {
     return 0;
   }
-#if 0
+#if 1
   print_system::log_info(std::string(__func__) +
                          ": nstreams_done_=" + std::to_string(nstreams_done_));
 #endif
   //
-
+ 
   while (!recv_queue.empty()) {
-  // for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
+    // for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
   // if (nstreams_done_ < config.nstreams) {
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
@@ -1991,12 +1999,21 @@ int Client::on_extend_max_streams() {
       config.requests[nstreams_done_ % config.requests.size()], stream_id);
     recv_cmt_msg_t *last_cmt = recv_queue.pop();
     if (last_cmt != nullptr) {
-      stream->sent_data = std::to_string(last_cmt->blk_id);
+      // stream->sent_data = std::to_string(last_cmt->blk_id);
+      stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE);
+      ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t), last_cmt->tail_commitment, COMMITMENT_SIZE);
     } else {
-      stream->sent_data = std::to_string(0);
+      // stream->sent_data = std::to_string(stream_id);
+       stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE);
+      uint64_t blk = 0;
+     ::memcpy(stream->sent_data.data(), &stream_id, sizeof(uint64_t));
+     //::memcpy(stream->sent_data.data(), &blk, sizeof(uint64_t));
     }
     stream->transmittion_timestamp = util::timestamp();
-
+    if (global_start_time_ns == 0) {
+      global_start_time_ns = util::timestamp();
+    }
     if (submit_http_request(stream.get()) != 0) {
       return 0;
     }
@@ -2006,7 +2023,7 @@ int Client::on_extend_max_streams() {
     }
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
-  } 
+  }
   /*
   else {
     static bool logged = false;
@@ -2048,7 +2065,7 @@ int Client::submit_http_request(const Stream *stream) {
 
   const auto &req = stream->req;
   config.datalen = stream->sent_data.size();
-
+  
   std::array<nghttp3_nv, 6> nva{
     util::make_nv_nn(":method", config.http_method),
     util::make_nv_nn(":scheme", req.scheme),
@@ -2384,15 +2401,17 @@ void Client::notify_kernel(const char *poolname, const uint64_t zil_blk_id) {
   free(tx_msg);
 }
 
+
+
 int Client::http_end_stream(int64_t stream_id) {
-  static double sum_latency_ms = 0;
   auto it = streams_.find(stream_id);
   if (it == std::end(streams_)) {
     print_system::log_error(std::string(__func__) + " stream_id=" +
                             std::to_string(stream_id) + ", stream not found");
     return -1;
   }
-
+  static int req_id_count = 0;
+  req_id_count++;
   auto &stream = (*it).second;
 
   // constexpr size_t k_expected_size = 150;
@@ -2422,6 +2441,45 @@ int Client::http_end_stream(int64_t stream_id) {
     return 0;
   }
 
+  if (req_id_count == config.nstreams) {
+    double avg_latency = static_cast<double>(sum_latency_ms) /
+                         static_cast<double>(req_id_count);
+    std::string avg_latency_str = std::format("{:.4f}", avg_latency);
+    print_system::log(
+      std::string(std::string(__func__)) +
+      " ALL streams done! nstreams_done_=" + std::to_string(config.nstreams) +
+      " avg_latency=" + avg_latency_str + " ms" +
+          "req_id_count= " + std::to_string(req_id_count) 
+);
+  }
+
+  if (req_id_count % 500 == 0) {
+    double avg_latency = static_cast<double>(sum_latency_ms) /
+                         static_cast<double>(req_id_count);
+    auto current_duration_in_ns = now - global_start_time_ns;
+    double current_duration_in_sec = (current_duration_in_ns * 1.0) / 1000000000.0;
+    double ops_per_s = (req_id_count * 1.0) / (current_duration_in_sec * 1.0);
+    std::string avg_throughput_str = std::format("{:.4f}", ops_per_s);
+    std::string avg_latency_str = std::format("{:.4f}", avg_latency);
+    print_system::log(
+      "req_id_count= " + std::to_string(req_id_count) +
+      " stream_id=" + std::to_string(stream_id) +
+      " latency=" + std::to_string(latency_ms) +
+      " ms (tx_ts=" + std::to_string(stream->transmittion_timestamp) +
+      ", rx_ts=" + std::to_string(now) + ")" + " request_id=" + request_id +
+      " zil_blk_id=" + zil_blk_id + " ccf_commit_seqno=" + ccf_commit_seqno +
+      " nstreams_done_=" + std::to_string(nstreams_done_) +
+      " config.nstreams=" + std::to_string(config.nstreams) +
+      " avg_latency=" + avg_latency_str + " ms" + 
+      " avg throuhgput (requests/sec) = " + avg_throughput_str + 
+      " res=" +
+      ((req_id_count == config.nstreams) ? "true" : "false"));
+   // std::cout << stream->received_data << "\n\n";
+      //std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+
+#if 0
   if (std::stoi(request_id) == config.nstreams) {
     double avg_latency = static_cast<double>(sum_latency_ms) /
                          static_cast<double>(std::stoi(request_id));
@@ -2432,9 +2490,13 @@ int Client::http_end_stream(int64_t stream_id) {
       " avg_latency=" + avg_latency_str + " ms");
   }
 
-  if (std::stoi(request_id) % 50000 == 0) {
+  if (std::stoi(request_id) % 500 == 0) {
     double avg_latency = static_cast<double>(sum_latency_ms) /
                          static_cast<double>(std::stoi(request_id));
+    auto current_duration_in_ns = now - global_start_time_ns;
+    double current_duration_in_sec = (current_duration_in_ns * 1.0) / 1000000000.0;
+    double ops_per_s = (std::stoi(request_id) * 1.0) / (current_duration_in_sec * 1.0);
+    std::string avg_throughput_str = std::format("{:.4f}", ops_per_s);
     std::string avg_latency_str = std::format("{:.4f}", avg_latency);
     print_system::log(
       " stream_id=" + std::to_string(stream_id) +
@@ -2444,13 +2506,17 @@ int Client::http_end_stream(int64_t stream_id) {
       " zil_blk_id=" + zil_blk_id + " ccf_commit_seqno=" + ccf_commit_seqno +
       " nstreams_done_=" + std::to_string(nstreams_done_) +
       " config.nstreams=" + std::to_string(config.nstreams) +
-      " avg_latency=" + avg_latency_str + " ms" + " res=" +
+      " avg_latency=" + avg_latency_str + " ms" + 
+      " avg throuhgput (requests/sec) = " + avg_throughput_str + 
+      " res=" +
       ((std::stoi(request_id) == config.nstreams) ? "true" : "false"));
+   // std::cout << stream->received_data << "\n\n";
+      // std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-
-  if (std::stoi(zil_blk_id) != 0)
+#endif
+  
+  if (kernel_socket > 0 && std::stoi(zil_blk_id) != 0)
     notify_kernel("zpool", std::stoi(zil_blk_id));
-
   return 0;
 }
 
@@ -2458,7 +2524,7 @@ void Client::create_socket_kernel() {
   struct sockaddr_nl src_addr;
   // @dimitra: uncomment me to disable kernel notification
   // kernel_socket = -1;
-  // return;
+  //return;
   kernel_socket = socket(PF_NETLINK, SOCK_RAW, NOTIFY_CMTS_SOCK);
   if (kernel_socket < 0) {
     print_system::log_error(std::string(__func__) +
@@ -2771,7 +2837,7 @@ void config_set_default(Config &config) {
     .ciphers = util::crypto_default_ciphers(),
     .groups = util::crypto_default_groups(),
     .version = NGTCP2_PROTO_VER_V1,
-    .timeout = 30 * NGTCP2_SECONDS,
+    .timeout = 3000 * NGTCP2_SECONDS,
     .http_method = "PUT"sv,
     .max_data = 24_m,
     .max_stream_data_bidi_local = 16_m,
@@ -3150,8 +3216,18 @@ void zfs_userspace_client::get_commitment(
   auto [exp_dist, uni_dist, normal_dist] = distributions;
   if (kernel_endpoint < 0) {
 #if 1
+    // std::this_thread::sleep_for(
+    //  std::chrono::microseconds(1000 /*uni_dist[idx % n_samples]*10*/));
     std::this_thread::sleep_for(
-      std::chrono::microseconds(10 /*normal_dist[idx % n_samples]*/));
+      std::chrono::microseconds(1000));
+    recv_cmt_msg_t *recv_msg = new recv_cmt_msg_t();
+    recv_msg->blk_id = idx; 
+    strncpy(recv_msg->poolname, poolname, ZFS_MAX_DATASET_NAME_LEN);
+  //   printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
+  //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
+  // todo: push the cmt to a queue.
+  //std::cout << "Simulated cmt received for blk_id=" << recv_msg->blk_id << "\n";
+  recv_queue.push(recv_msg); // push the received message to the queue
 #endif
     return;
   }
@@ -3210,15 +3286,16 @@ void zfs_userspace_client::get_commitment(
   //   printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
   //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
   // todo: push the cmt to a queue.
+  
   recv_queue.push(recv_msg); // push the received message to the queue
 
-  //std::this_thread::sleep_for(std::chrono::microseconds(5));
+  //std::this_thread::sleep_for(std::chrono::microseconds(10000));
   free(nlh);
 }
 
 int zfs_userspace_client::create_local_endpoint_receiver_kernelspace() {
   // @dimitra: uncomment to disable getting cmts from kernel
-  // return -1;
+  //return -1;
   int kernel_socket = socket(PF_NETLINK, SOCK_RAW, GET_CMTS_SOCK);
 
   if (kernel_socket < 0) {
