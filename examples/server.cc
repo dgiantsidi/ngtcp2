@@ -53,6 +53,7 @@
 #include "shared.h"
 #include "http.h"
 #include "template.h"
+#include <barrier>
 
 using namespace ngtcp2;
 using namespace std::literals;
@@ -1307,7 +1308,7 @@ int Handler::http_submit_responses(uint64_t _ccf_commit_seqno) {
     auto req_latency =
       util::timestamp() - item->request->ts; // this is in nanoseconds
     if (req_latency < 300000) {
-      return 0;
+      // return 0;
     }
     std::cout << "*==== SYSTEM ====* " << __func__
               << " stream_id=" << item->stream->stream_id
@@ -1365,10 +1366,21 @@ int Handler::http_end_stream(Stream *stream) {
     request_counter++;
     nb_received_requests.fetch_add(1);
     if (stream->received_data.size() > 0) {
-      auto &id = stream->received_data;
-      item->request->zil_blk_id = std::stoll(id);
+      uint64_t zil_blk_id = 2;
+      ::memcpy(&zil_blk_id, stream->received_data.data(), sizeof(uint64_t));
+      item->request->zil_blk_id = zil_blk_id;
     } else
       item->request->zil_blk_id = 0;
+    
+    std::unique_ptr<http_reponse_msg_t> response_msg =
+      std::make_unique<http_reponse_msg_t>();
+    response_msg->request_id = item->request->request_id;
+    response_msg->zil_blk_id = item->request->zil_blk_id;
+    response_msg->ccf_commit_seqno = item->request->zil_blk_id;
+    //::memcpy(response_msg->commitment, item->request->commitment, 32);
+
+    return start_response(item->stream, std::move(response_msg));
+
     std::lock_guard<std::mutex> lock(Q.queue_mutex);
     Q.response_queue.push(std::move(item));
     started.store(true);
@@ -2459,7 +2471,7 @@ int Handler::on_stream_close(int64_t stream_id, uint64_t app_error_code) {
 
 void Handler::shutdown_read(int64_t stream_id, int app_error_code) {
   // ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
-  std::cerr << " SHUTDOWN stream_id=" << stream_id << "\n";
+  // std::cerr << " SHUTDOWN stream_id=" << stream_id << "\n";
   auto rv =
     ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
   if (rv != 0) {
@@ -2483,11 +2495,11 @@ void siginthandler(struct ev_loop *loop, ev_signal *watcher, int revents) {
 }
 } // namespace
 
-Server::Server(struct ev_loop *loop, TLSServerContext &tls_ctx)
+Server::Server(struct ev_loop *loop, TLSServerContext &tls_ctx, int i)
   : loop_(loop),
     tls_ctx_(tls_ctx),
     stateless_reset_bucket_(NGTCP2_STATELESS_RESET_BURST) {
-  ev_signal_init(&sigintev_, siginthandler, SIGINT);
+  //ev_signal_init(&sigintev_, siginthandler, SIGINT);
 
   ev_timer_init(
     &stateless_reset_regen_timer_,
@@ -2499,7 +2511,7 @@ Server::Server(struct ev_loop *loop, TLSServerContext &tls_ctx)
     0., 1.);
   stateless_reset_regen_timer_.data = this;
 
-  local_endpoint = create_local_endpoint_receiver();
+  local_endpoint = create_local_endpoint_receiver(i);
   if (local_endpoint < 0) {
     print_system::log_error(std::string(__func__) + " " + std::strerror(errno));
     exit(EXIT_FAILURE);
@@ -2509,7 +2521,7 @@ Server::Server(struct ev_loop *loop, TLSServerContext &tls_ctx)
   // ev_io_start(loop_, &local_wev_);
 }
 
-int Server::create_local_endpoint_receiver() {
+int Server::create_local_endpoint_receiver(int k_server_id) {
   auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
     print_system::log_error("socket creation failed");
@@ -2518,13 +2530,14 @@ int Server::create_local_endpoint_receiver() {
 
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;          // listen on all interfaces
-  server_addr.sin_port = htons(k_local_server_port); // port number
+  server_addr.sin_addr.s_addr = INADDR_ANY; // listen on all interfaces
+  server_addr.sin_port = htons(k_local_server_port + k_server_id); // port number
 
   if (bind(server_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    std::string print_msg =
-      std::string(std::string(__func__)) + " could not bind to port " +
-      std::to_string(k_local_server_port) + ", Error=" + std::strerror(errno);
+    std::string print_msg = std::string(std::string(__func__)) +
+                            " could not bind to port " +
+                            std::to_string(k_local_server_port + k_server_id) +
+                            ", Error=" + std::strerror(errno);
     print_system::log_error(print_msg);
     ::close(server_fd);
     return -1;
@@ -2533,14 +2546,14 @@ int Server::create_local_endpoint_receiver() {
   if (listen(server_fd, 5) < 0) {
     std::string print_msg =
       std::string(std::string(__func__)) + " could not listen on port " +
-      std::to_string(k_local_server_port) + ", Error=" + std::strerror(errno);
+      std::to_string(k_local_server_port + k_server_id) + ", Error=" + std::strerror(errno);
     print_system::log_error(print_msg);
     ::close(server_fd);
     return -1;
   }
 
   print_system::log_info(
-    "Local endpoint on receiver userspace side created successfully.");
+    "Local endpoint on receiver userspace side created successfully on port:" + std::to_string(k_local_server_port + k_server_id));
 
   sockaddr_in client_addr{};
   socklen_t client_len = sizeof(client_addr);
@@ -2584,7 +2597,7 @@ void Server::disconnect() {
   }
 
   ev_timer_stop(loop_, &stateless_reset_regen_timer_);
-  ev_signal_stop(loop_, &sigintev_);
+  //ev_signal_stop(loop_, &sigintev_);
 
   while (!handlers_.empty()) {
     auto it = std::begin(handlers_);
@@ -2798,7 +2811,8 @@ int Server::init(const char *addr, const char *port) {
     ev_io_start(loop_, &ep.rev);
   }
 
-  ev_signal_start(loop_, &sigintev_);
+  //
+  // ev_signal_start(loop_, &sigintev_);
 
   return 0;
 }
@@ -3909,74 +3923,84 @@ Options:
 }
 } // namespace
 
-ccf_monitor::ccf_monitor() {
-  print_system::log_info("Starting ccf_monitor thread.");
-  agent_thread = std::thread(&ccf_monitor::thread_func_get_commit_seqno, this);
+ccf_monitor::ccf_monitor(int no_servers) {
+  print_system::log_info("Starting ccf_monitor thread with " +
+                         std::to_string(no_servers) + " servers.");
+  agent_thread =
+    std::thread(&ccf_monitor::thread_func_get_commit_seqno, this, no_servers);
 }
 
 void ccf_monitor::notify_quic_server_thread(uint64_t current_seqno) {
-  send(quic_server_local_endpoint, &current_seqno, sizeof(uint64_t), 0);
+  // auto& quic_server_local_endpoint = quic_server_local_endpoints[0];
+  // for (auto quic_server_local_endpoint : quic_server_local_endpoints)
+  // send(quic_server_local_endpoint, &current_seqno, sizeof(uint64_t), 0);
 }
 
-int ccf_monitor::create_local_endpoint_sender() {
-  int sender_socket = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
-  if (sender_socket < 0) {
-    print_system::log_error("socket creation failed");
-    return -1;
-  }
-
-  sockaddr_in server_addr{};
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(k_local_server_port); // port number
-
-  // convert IP address from text to binary
-  if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
-    ::close(sender_socket);
-    return -1;
-  }
-  int connect_tries = 0;
-  for (;;) {
-    // connect to the server
-    if (connect(sender_socket, (sockaddr *)&server_addr, sizeof(server_addr)) <
-        0) {
-      print_system::log_error(
-        "Connection to local endpoint failed, retrying...");
-      connect_tries++;
-      std::this_thread::sleep_for(std::chrono::seconds(3));
-      if (connect_tries > 1000) {
-        ::close(sender_socket);
-        return -1;
-      }
-    } else {
-      break;
+int ccf_monitor::create_local_endpoint_sender(int no_servers) {
+  for (auto i = 0; i < no_servers; i++) {
+    int sender_socket = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+    if (sender_socket < 0) {
+      print_system::log_error("socket creation failed");
+      return -1;
     }
-  }
 
-  // set the socket to non-blocking mode
-  int flags = fcntl(sender_socket, F_GETFL, 0);
-  if (flags == -1) {
-    ::close(sender_socket);
-    return -1;
-  }
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(k_local_server_port + i); // port number
 
-  if (fcntl(sender_socket, F_SETFL, flags | O_NONBLOCK) == -1) {
-    ::close(sender_socket);
-    return -1;
+    // convert IP address from text to binary
+    if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
+      ::close(sender_socket);
+      return -1;
+    }
+    int connect_tries = 0;
+    for (;;) {
+      // connect to the server
+      if (connect(sender_socket, (sockaddr *)&server_addr,
+                  sizeof(server_addr)) < 0) {
+        print_system::log_error(
+          "Connection to local endpoint failed on port " + std::to_string(k_local_server_port + i) + ", retrying...");
+        connect_tries++;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        if (connect_tries > 1000) {
+          ::close(sender_socket);
+          return -1;
+        }
+      } else {
+        break;
+      }
+    }
+
+    // set the socket to non-blocking mode
+    int flags = fcntl(sender_socket, F_GETFL, 0);
+    if (flags == -1) {
+      ::close(sender_socket);
+      return -1;
+    }
+
+    if (fcntl(sender_socket, F_SETFL, flags | O_NONBLOCK) == -1) {
+      ::close(sender_socket);
+      return -1;
+    }
+    print_system::log_info("Connected to local endpoint suceeded.");
+    quic_server_local_endpoints.push_back(sender_socket);
   }
-  print_system::log_info("Connected to local endpoint suceeded.");
-  return sender_socket;
+  return 1; // sender_socket;
 }
 
-void ccf_monitor::thread_func_get_commit_seqno() {
-  quic_server_local_endpoint = create_local_endpoint_sender();
+void ccf_monitor::thread_func_get_commit_seqno(int no_servers) {
+  std::string name = "monitor_thread";
+  pthread_setname_np(pthread_self(), name.c_str());
+  create_local_endpoint_sender(no_servers);
   // synchronization::wait_monitor();
   uint64_t current_seqno = 0;
   while (true) {
     {
+      #if 0
       print_system::log_info(
         " send commit_seqno=" + std::to_string(current_seqno) +
         " to local endpoint");
-
+      #endif
       // @dimitra: this should be replaced by a condition variable from CCF
       // consensus layer
 
@@ -3998,9 +4022,40 @@ void ccf_monitor::thread_func_get_commit_seqno() {
 
 std::ofstream keylog_file;
 
+static void
+create_server_thread(int i, const char *private_key_file, const char *cert_file,
+                     const char *addr, const char *port,
+                     std::barrier<std::__empty_completion> &sync_point) {
+  // Create a new event loop for this thread
+  struct ev_loop *loop = ev_loop_new(EVFLAG_AUTO);
+
+  auto name = "server_thread_" + std::to_string(i);
+  pthread_setname_np(pthread_self(), name.c_str());
+
+  TLSServerContext tls_ctx;
+
+  if (tls_ctx.init(private_key_file, cert_file, AppProtocol::H3) != 0) {
+    exit(EXIT_FAILURE);
+  }
+  Server *s = new Server(loop, tls_ctx, i);
+
+  int port_num = std::stoll(port) + i;
+  std::string port_str = std::to_string(port_num);
+  s->init(addr, port_str.c_str());
+  s->assign_server_id(i);
+  sync_point.arrive_and_wait();
+  std::cout << __PRETTY_FUNCTION__ << " i=" << i << "\n";
+  ev_run(loop, 0);
+
+  s->disconnect();
+  s->close();
+  ev_loop_destroy(loop);
+  delete (s);
+}
+
 int main(int argc, char **argv) {
   config_set_default(config);
-  ccf_monitor_ptr = std::make_unique<ccf_monitor>();
+
   if (argc) {
     prog = basename(argv[0]);
   }
@@ -4463,6 +4518,25 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
+  uint64_t no_servers = 2;
+  std::vector<std::thread> threads;
+  std::barrier sync_point(no_servers + 1);
+
+  for (auto i = 0; i < no_servers; i++) {
+    threads.emplace_back(create_server_thread, i, private_key_file, cert_file,
+                         addr, port, std::ref(sync_point));
+  }
+  ccf_monitor_ptr = std::make_unique<ccf_monitor>(2);
+
+  sync_point.arrive_and_wait();
+  std::cout << __PRETTY_FUNCTION__ << " all threads done in std::barrier\n";
+
+  for (auto &t : threads)
+    t.join();
+
+  std::cout << __PRETTY_FUNCTION__ << " SHOULD NOT REACH HERE\n";
+  exit(128);
+#if 0
   Server s(EV_DEFAULT, tls_ctx);
   if (s.init(addr, port) != 0) {
     exit(EXIT_FAILURE);
@@ -4472,6 +4546,6 @@ int main(int argc, char **argv) {
 
   s.disconnect();
   s.close();
-
+#endif
   return EXIT_SUCCESS;
 }

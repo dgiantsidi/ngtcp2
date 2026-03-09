@@ -56,6 +56,7 @@ using namespace std::literals;
 
 static double sum_latency_ms = 0;
 static uint64_t global_start_time_ns = 0;
+bool k_print_cmts = false;
 
 std::tuple<exp_distribution, uni_distribution, normal_distribution>
 construct_distribution(const int min_us, const int max_us,
@@ -1975,7 +1976,10 @@ int Client::make_stream_early() {
 int Client::on_extend_max_streams() {
   //std::this_thread::sleep_for(std::chrono::milliseconds(10));
   int64_t stream_id;
+  static int64_t latest_sent_blk_id = 0;
 
+
+ 
   if ((config.delay_stream && !handshake_confirmed_) ||
       ev_is_active(&delay_stream_timer_)) {
     return 0;
@@ -1986,15 +1990,37 @@ int Client::on_extend_max_streams() {
 #endif
   //
  
-  while (!recv_queue.empty()) {
+  //while (!recv_queue.empty()) {
     // for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
-  // if (nstreams_done_ < config.nstreams) {
+  if (nstreams_done_ < config.nstreams) {
+   
+    #if 0
+    recv_cmt_msg_t *last_cmt = recv_queue.pop();
+    if (last_cmt == nullptr) {
+      return 0;
+    }
+    if (latest_sent_blk_id > last_cmt->blk_id && latest_sent_blk_id > 0) {
+      return 0;
+    }
+    latest_sent_blk_id =  last_cmt->blk_id;
+    //std::cout << __func__ << " " << latest_sent_blk_id << "\n";
+    
+    #endif
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
       assert(NGTCP2_ERR_STREAM_ID_BLOCKED == rv);
+      static int64_t error_count = 1;
+      if (error_count % 10000 == 0) {
+        auto e_time = util::timestamp();
+
+        auto throughput = (static_cast<double>(error_count) * 1000000000.0) / static_cast<double>(e_time - global_start_time_ns);
+        std::cout << __PRETTY_FUNCTION__ << " ERROR throughput=" << throughput << " errors/s\n";
+        error_count++;
+      }
+      
       return 0;
     }
-
+   
     auto stream = std::make_unique<Stream>(
       config.requests[nstreams_done_ % config.requests.size()], stream_id);
     recv_cmt_msg_t *last_cmt = recv_queue.pop();
@@ -2002,12 +2028,30 @@ int Client::on_extend_max_streams() {
       // stream->sent_data = std::to_string(last_cmt->blk_id);
       stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE);
       ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
+      
+      uint64_t v1 = 0x007fc94a3c566541ULL;
+      uint64_t v2 = 0x0447623f4033ded1ULL;
+      uint64_t v3 = 0x1a3f55944a54357eULL;
+      uint64_t v4 = 0xfd9ed2fb493067e4ULL;
+
+      //uint64_t be = std::byteswap(v1);          // little-endian host -> big-endian
+      std::memcpy(last_cmt->tail_commitment, &v1, sizeof(uint64_t));
+      //be = std::byteswap(v2);
+      std::memcpy(last_cmt->tail_commitment + sizeof(uint64_t), &v2, sizeof(uint64_t));
+      //be = std::byteswap(v3);
+      std::memcpy(last_cmt->tail_commitment + 2 * sizeof(uint64_t), &v3, sizeof(uint64_t));
+      //be = std::byteswap(v4);
+      std::memcpy(last_cmt->tail_commitment + 3 * sizeof(uint64_t), &v4, sizeof(uint64_t));
       ::memcpy(stream->sent_data.data() + sizeof(uint64_t), last_cmt->tail_commitment, COMMITMENT_SIZE);
     } else {
+      //return 0;
       // stream->sent_data = std::to_string(stream_id);
        stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE);
       uint64_t blk = 0;
      ::memcpy(stream->sent_data.data(), &stream_id, sizeof(uint64_t));
+      uint64_t v[4] = {0x007fc94a3c566541ULL, 0x0447623f4033ded1ULL, 0x1a3f55944a54357eULL, 0xfd9ed2fb493067e4ULL};
+
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t), v, COMMITMENT_SIZE);
      //::memcpy(stream->sent_data.data(), &blk, sizeof(uint64_t));
     }
     stream->transmittion_timestamp = util::timestamp();
@@ -2024,6 +2068,7 @@ int Client::on_extend_max_streams() {
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
   }
+  
   /*
   else {
     static bool logged = false;
@@ -2062,7 +2107,7 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 
 int Client::submit_http_request(const Stream *stream) {
   std::string content_length_str;
-
+  static uint64_t request_count = 0;
   const auto &req = stream->req;
   config.datalen = stream->sent_data.size();
   
@@ -2101,6 +2146,15 @@ int Client::submit_http_request(const Stream *stream) {
     " content_length=" + std::to_string(stream->sent_data.size()));
 
   shutdown_write(stream->stream_id, NGHTTP3_H3_NO_ERROR);
+
+  request_count++;
+  if (request_count % 10000 == 0) {
+    auto e_time = util::timestamp();
+
+    auto throughput = (static_cast<double>(request_count) * 1000000000.0) / static_cast<double>(e_time - global_start_time_ns);
+    std::cout << __PRETTY_FUNCTION__ << " submission requests throughput=" << throughput << " req/s\n";
+  }
+  
   return 0;
 }
 
@@ -2423,6 +2477,16 @@ int Client::http_end_stream(int64_t stream_id) {
     extract_value(stream->received_data, "ZIL Block ID:</strong> ");
   auto ccf_commit_seqno =
     extract_value(stream->received_data, "CCF Commit Seqno:</strong> ");
+  auto commitment =
+    extract_value(stream->received_data, "Commitment:</strong> ");
+
+
+  if (k_print_cmts) {
+    uint64_t cmt[4];
+    memcpy(cmt, commitment.data(), sizeof(cmt));
+    using u_longlong_t = unsigned long long;
+    printf("%016llx:%016llx:%016llx:%016llx\n", (u_longlong_t) cmt[0], (u_longlong_t) cmt[1], (u_longlong_t) cmt[2], (u_longlong_t) cmt[3]);
+  }
   auto now = util::timestamp();
   auto latency_ns = now - stream->transmittion_timestamp;
   auto latency_ms = (latency_ns * 1.0) / 1000000.0;
@@ -2453,7 +2517,7 @@ int Client::http_end_stream(int64_t stream_id) {
 );
   }
 
-  if (req_id_count % 500 == 0) {
+  if (req_id_count % 10000 == 0) {
     double avg_latency = static_cast<double>(sum_latency_ms) /
                          static_cast<double>(req_id_count);
     auto current_duration_in_ns = now - global_start_time_ns;
@@ -2507,7 +2571,7 @@ int Client::http_end_stream(int64_t stream_id) {
       " nstreams_done_=" + std::to_string(nstreams_done_) +
       " config.nstreams=" + std::to_string(config.nstreams) +
       " avg_latency=" + avg_latency_str + " ms" + 
-      " avg throuhgput (requests/sec) = " + avg_throughput_str + 
+      " avg throughput (requests/sec) = " + avg_throughput_str + 
       " res=" +
       ((std::stoi(request_id) == config.nstreams) ? "true" : "false"));
    // std::cout << stream->received_data << "\n\n";
@@ -2523,8 +2587,8 @@ int Client::http_end_stream(int64_t stream_id) {
 void Client::create_socket_kernel() {
   struct sockaddr_nl src_addr;
   // @dimitra: uncomment me to disable kernel notification
-  // kernel_socket = -1;
-  //return;
+  kernel_socket = -1;
+  return;
   kernel_socket = socket(PF_NETLINK, SOCK_RAW, NOTIFY_CMTS_SOCK);
   if (kernel_socket < 0) {
     print_system::log_error(std::string(__func__) +
@@ -3295,7 +3359,7 @@ void zfs_userspace_client::get_commitment(
 
 int zfs_userspace_client::create_local_endpoint_receiver_kernelspace() {
   // @dimitra: uncomment to disable getting cmts from kernel
-  //return -1;
+  return -1;
   int kernel_socket = socket(PF_NETLINK, SOCK_RAW, GET_CMTS_SOCK);
 
   if (kernel_socket < 0) {
@@ -3416,6 +3480,7 @@ int main(int argc, char **argv) {
       {"initial-pkt-num", required_argument, &flag, 42},
       {"pmtud-probes", required_argument, &flag, 43},
       {"poolname", required_argument, &flag, 44},
+      {"print_cmts", no_argument, &flag, 45},
       {},
     };
 
@@ -3862,6 +3927,11 @@ int main(int argc, char **argv) {
       case 44: {
         zfs_client =
           std::make_unique<zfs_userspace_client>(static_cast<char *>(optarg));
+        break;
+
+      }
+      case 45: {
+        k_print_cmts = true;
       }
       }
       break;

@@ -49,9 +49,9 @@
 #include "shared.h"
 #include "template.h"
 #include <thread>
-#include "/home/azureuser/genltest/prototype/config_c.h"
-#include "/home/azureuser/genltest/prototype/msg_processing_functions.h"
-#include "/home/azureuser/genltest/prototype/fifo_queue.hpp"
+#include "/home/dimitra/genltest/prototype/config_c.h"
+#include "/home/dimitra/genltest/prototype/msg_processing_functions.h"
+#include "/home/dimitra/genltest/prototype/fifo_queue.hpp"
 
 using namespace ngtcp2;
 

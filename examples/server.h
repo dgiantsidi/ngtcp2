@@ -257,7 +257,7 @@ struct string_hash {
 
 class Server {
 public:
-  Server(struct ev_loop *loop, TLSServerContext &tls_ctx);
+  Server(struct ev_loop *loop, TLSServerContext &tls_ctx, int server_id);
   ~Server();
 
   int init(const char *addr, const char *port);
@@ -298,12 +298,14 @@ public:
   void dissociate_cid(const ngtcp2_cid *cid);
 
   void on_stateless_reset_regen();
-  int create_local_endpoint_receiver();
+  int create_local_endpoint_receiver(int k_server_id);
   ev_io &get_local_wev_() { return local_wev_; }
   int &get_local_endpoint() { return local_endpoint; }
   int handlers_sz() { return handlers_.size(); }
+  void assign_server_id(const int &id) { server_id = id; };
 
 private:
+  int server_id = 0;
   std::unordered_map<std::string, Handler *, string_hash, std::equal_to<>>
     handlers_;
   ev_io local_wev_;
@@ -318,26 +320,25 @@ private:
 
 class ccf_monitor {
 public:
-  ccf_monitor();
+  ccf_monitor(int no_servers);
   void notify_quic_server_thread(uint64_t current_seqno);
-  int create_local_endpoint_sender();
-  void thread_func_get_commit_seqno();
+  int create_local_endpoint_sender(int no_servers);
+  void thread_func_get_commit_seqno(int no_servers);
 
 private:
-  int quic_server_local_endpoint;
+  std::vector<int> quic_server_local_endpoints;
   std::thread agent_thread;
 };
 
 namespace print_system {
 void log_info(const std::string_view &msg) {
-  // std::cerr << std::this_thread::get_id() << " *==== SYSTEM INFO ====* " <<
-  // msg
+  //std::cerr << std::this_thread::get_id() << " *==== SYSTEM INFO ====* " << msg
   //          << std::endl;
 }
 
 void log_error(const std::string_view &msg) {
-  // std::cerr << std::this_thread::get_id() << " *==== ERROR ====* " << msg
-  //          << std::endl;
+  std::cerr << std::this_thread::get_id() << " *==== ERROR ====* " << msg
+            << std::endl;
 }
 
 void log_reply(const std::string_view &msg) {
