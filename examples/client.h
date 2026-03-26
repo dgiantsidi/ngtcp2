@@ -65,6 +65,8 @@ const int max_us = 1000000; // 1000 milliseconds = 1000,000 microseconds = 1 sec
 fifo_queue<recv_cmt_msg_t *> recv_queue;
 
 constexpr int k_local_server_port = 12345;
+constexpr int k_local_server_port_ub = 23456;
+
 
 struct Stream {
   Stream(const Request &req, int64_t stream_id);
@@ -130,7 +132,7 @@ public:
   void start_key_update_timer();
   void start_delay_stream_timer();
   void notify_kernel(const char *poolname, const uint64_t zil_blk_id);
-
+  void notify_kernel_ub(uint64_t);
   int select_preferred_address(Address &selected_addr,
                                const ngtcp2_preferred_addr *paddr);
 
@@ -166,12 +168,14 @@ public:
 
   bool should_exit() const;
   int create_local_endpoint_receiver_userspace();
+  int create_local_endpoint_ub_receiver_userspace();
 
 private:
   std::vector<Endpoint> endpoints_;
   Address remote_addr_;
   ev_io wev_;
   ev_io local_wev_;
+  ev_io local_wev_ub_;
   ev_timer timer_;
   ev_timer requests_timer;
   ev_timer change_local_addr_timer_;
@@ -230,13 +234,28 @@ public:
   void notify_quic_client_thread(const int local_socket);
   int create_local_endpoint_sender_userspace();
 
-  void create_local_endpoint_kernelspace() {};
 
   void thread_func_get_cmt(void *args_poolname);
   void get_commitment(
     int kernel_endpoint, const char *poolname,
     std::tuple<exp_distribution, uni_distribution, normal_distribution>
       distributions);
+  int create_local_endpoint_receiver_kernelspace();
+
+private:
+  int quic_client_local_endpoint;
+  std::thread agent_thread;
+};
+
+class zfs_ub_userspace_client {
+public:
+  zfs_ub_userspace_client(void *poolnam);
+  void notify_quic_client_thread(const int local_socket);
+  int create_local_endpoint_sender_userspace();
+
+  void thread_func_get_cmt(void *args_poolname);
+  int get_commitment(
+    int kernel_endpoint, const char *poolname);
   int create_local_endpoint_receiver_kernelspace();
 
 private:
