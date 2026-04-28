@@ -29,6 +29,7 @@
 #include <iostream>
 #include <algorithm>
 #include <memory>
+#include <condition_variable>
 #include <fstream>
 #include <iomanip>
 
@@ -53,9 +54,17 @@
 
 using namespace ngtcp2;
 using namespace std::literals;
+using u_longlong_t = unsigned long long;
 
 static double sum_latency_ms = 0;
 static uint64_t global_start_time_ns = 0;
+bool k_print_cmts = false;
+static int k_client_id = -1;
+
+
+std::mutex ub_notification_mtx;
+uint64_t global_txg_ub = 0;
+std::condition_variable ub_cv;
 
 std::tuple<exp_distribution, uni_distribution, normal_distribution>
 construct_distribution(const int min_us, const int max_us,
@@ -211,6 +220,7 @@ void timeoutcb_requests(struct ev_loop *loop, ev_timer *w, int revents) {
 namespace {
 void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
   int rv;
+  std::cout << __func__ << "\n";
   auto c = static_cast<Client *>(w->data);
   if (revents & EV_READ) {
     char buffer[1024];
@@ -226,6 +236,37 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
       return;
     }
   }
+
+  std::cout << __func__ << " calling into on_extend_max_streams\n";
+
+  c->on_extend_max_streams();
+  c->on_write();
+}
+} // namespace
+
+
+
+namespace {
+void get_ub_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
+  int rv;
+  std::cout << __func__ << "\n";
+  auto c = static_cast<Client *>(w->data);
+  if (revents & EV_READ) {
+    char buffer[1024];
+    size_t n = read(w->fd, buffer, 22);
+    if (n < 0) {
+      print_system::log_error(
+        "Error reading notification from local endpoint.");
+      std::cout << "Error reading notification from local endpoint.\n";
+      return;
+    } else if (n == 0) {
+      // no more notifications
+      std::cout << "No more notifications from local endpoint.\n";
+      return;
+    }
+  }
+
+  std::cout << __func__ << " calling into on_extend_max_streams\n";
 
   c->on_extend_max_streams();
   c->on_write();
@@ -311,11 +352,23 @@ Client::Client(struct ev_loop *loop, uint32_t client_chosen_version,
   ev_timer_start(loop, &requests_timer);
 #endif
   int local_endpoint = create_local_endpoint_receiver_userspace();
-  if (local_endpoint < 0)
+  if (local_endpoint < 0) {
+    std::cout << __func__ << " configured w/o local_endpoint\n";
     return;
+  }
   ev_io_init(&local_wev_, get_notification_cb, local_endpoint, EV_READ);
   local_wev_.data = this;
   ev_io_start(loop_, &local_wev_);
+
+  int local_endpoint_ub = create_local_endpoint_ub_receiver_userspace();
+  if (local_endpoint_ub < 0) {
+    std::cout << __func__ << " configured w/o local_endpoint_ub\n";
+    return;
+  }
+  ev_io_init(&local_wev_ub_, get_ub_notification_cb, local_endpoint_ub, EV_READ);
+  local_wev_ub_.data = this;
+  ev_io_start(loop_, &local_wev_ub_);
+  std::cout << __func__ << " configuration of endpoints -- done\n";
 }
 
 Client::~Client() {
@@ -1973,8 +2026,9 @@ int Client::make_stream_early() {
 }
 
 int Client::on_extend_max_streams() {
-  //std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  // std::this_thread::sleep_for(std::chrono::milliseconds(10));
   int64_t stream_id;
+  static int64_t latest_sent_blk_id = 0;
 
   if ((config.delay_stream && !handshake_confirmed_) ||
       ev_is_active(&delay_stream_timer_)) {
@@ -1985,13 +2039,36 @@ int Client::on_extend_max_streams() {
                          ": nstreams_done_=" + std::to_string(nstreams_done_));
 #endif
   //
- 
+  std::cout << __func__ << " nstreams_done_=" << nstreams_done_ << "\n";
   while (!recv_queue.empty()) {
-    // for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
-  // if (nstreams_done_ < config.nstreams) {
+  //  for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
+  // if (nstreams_done_ < config.nstreams) 
+#if 0
+    recv_cmt_msg_t *last_cmt = recv_queue.pop();
+    if (last_cmt == nullptr) {
+      return 0;
+    }
+    if (latest_sent_blk_id > last_cmt->blk_id && latest_sent_blk_id > 0) {
+      return 0;
+    }
+    latest_sent_blk_id =  last_cmt->blk_id;
+    //std::cout << __func__ << " " << latest_sent_blk_id << "\n";
+
+#endif
     if (auto rv = ngtcp2_conn_open_bidi_stream(conn_, &stream_id, nullptr);
         rv != 0) {
       assert(NGTCP2_ERR_STREAM_ID_BLOCKED == rv);
+      static int64_t error_count = 1;
+      if (error_count % 10000 == 0) {
+        auto e_time = util::timestamp();
+
+        auto throughput = (static_cast<double>(error_count) * 1000000000.0) /
+                          static_cast<double>(e_time - global_start_time_ns);
+        std::cout << __PRETTY_FUNCTION__ << " ERROR throughput=" << throughput
+                  << " errors/s\n";
+        error_count++;
+      }
+
       return 0;
     }
 
@@ -2000,15 +2077,51 @@ int Client::on_extend_max_streams() {
     recv_cmt_msg_t *last_cmt = recv_queue.pop();
     if (last_cmt != nullptr) {
       // stream->sent_data = std::to_string(last_cmt->blk_id);
-      stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE);
+      stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
+                               sizeof(int));
       ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t), last_cmt->tail_commitment, COMMITMENT_SIZE);
+
+      #if 0
+      // todo: remove this on the actual system
+      uint64_t v1 = 0x007fc94a3c566541ULL;
+      uint64_t v2 = 0x0447623f4033ded1ULL;
+      uint64_t v3 = 0x1a3f55944a54357eULL;
+      uint64_t v4 = 0xfd9ed2fb493067e4ULL;
+
+      // uint64_t be = std::byteswap(v1);          // little-endian host ->
+      // big-endian
+      std::memcpy(last_cmt->tail_commitment, &v1, sizeof(uint64_t));
+      // be = std::byteswap(v2);
+      std::memcpy(last_cmt->tail_commitment + sizeof(uint64_t), &v2,
+                  sizeof(uint64_t));
+      // be = std::byteswap(v3);
+      std::memcpy(last_cmt->tail_commitment + 2 * sizeof(uint64_t), &v3,
+                  sizeof(uint64_t));
+      // be = std::byteswap(v4);
+      std::memcpy(last_cmt->tail_commitment + 3 * sizeof(uint64_t), &v4,
+                  sizeof(uint64_t));
+      #endif
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t),
+               last_cmt->tail_commitment, COMMITMENT_SIZE);
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
+               &(last_cmt->blk_type), sizeof(int));
+      std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
+      free(last_cmt);
     } else {
-      // stream->sent_data = std::to_string(stream_id);
-       stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE);
+      // return 0;
+      //  stream->sent_data = std::to_string(stream_id);
+      stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
+                               sizeof(int));
       uint64_t blk = 0;
-     ::memcpy(stream->sent_data.data(), &stream_id, sizeof(uint64_t));
-     //::memcpy(stream->sent_data.data(), &blk, sizeof(uint64_t));
+      ::memcpy(stream->sent_data.data(), &stream_id, sizeof(uint64_t));
+      uint64_t v[4] = {0x007fc94a3c566541ULL, 0x0447623f4033ded1ULL,
+                       0x1a3f55944a54357eULL, 0xfd9ed2fb493067e4ULL};
+
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t), v, COMMITMENT_SIZE);
+      int ub = block_type::UB;
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
+               &ub, sizeof(int));
+      //::memcpy(stream->sent_data.data(), &blk, sizeof(uint64_t));
     }
     stream->transmittion_timestamp = util::timestamp();
     if (global_start_time_ns == 0) {
@@ -2024,6 +2137,7 @@ int Client::on_extend_max_streams() {
     streams_.emplace(stream_id, std::move(stream));
     nstreams_done_++;
   }
+
   /*
   else {
     static bool logged = false;
@@ -2062,10 +2176,10 @@ nghttp3_ssize read_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
 
 int Client::submit_http_request(const Stream *stream) {
   std::string content_length_str;
-
+  static uint64_t request_count = 0;
   const auto &req = stream->req;
   config.datalen = stream->sent_data.size();
-  
+
   std::array<nghttp3_nv, 6> nva{
     util::make_nv_nn(":method", config.http_method),
     util::make_nv_nn(":scheme", req.scheme),
@@ -2101,6 +2215,17 @@ int Client::submit_http_request(const Stream *stream) {
     " content_length=" + std::to_string(stream->sent_data.size()));
 
   shutdown_write(stream->stream_id, NGHTTP3_H3_NO_ERROR);
+
+  request_count++;
+  if (request_count % 10000 == 0) {
+    auto e_time = util::timestamp();
+
+    auto throughput = (static_cast<double>(request_count) * 1000000000.0) /
+                      static_cast<double>(e_time - global_start_time_ns);
+    std::cout << __PRETTY_FUNCTION__
+              << " submission requests throughput=" << throughput << " req/s\n";
+  }
+
   return 0;
 }
 
@@ -2350,6 +2475,98 @@ static std::string extract_value(const std::string &body,
   return body.substr(pos, end - pos);
 }
 
+void ub_notification_thread() {
+  static uint64_t last_txg = -1;
+  struct sockaddr_nl src_addr, dest_addr;
+  struct msghdr msg;
+  struct iovec iov;
+  uint64_t total_ops = 0;
+
+  // create socket for sending notify messages
+  int sock_fd = socket(PF_NETLINK, SOCK_RAW, NOTIFY_UBCMTS_SOCK);
+  if (sock_fd < 0) {
+    printf("error creating the socket of type=%s, errno: %s\n",
+           get_socket_type(NOTIFY_UBCMTS_SOCK), strerror(errno));
+    return;
+  }
+
+  memset(&src_addr, 0, sizeof(src_addr));
+  src_addr.nl_family = AF_NETLINK;
+  src_addr.nl_pid = getpid(); /* self pid */
+  src_addr.nl_groups = 0;     /* not in mcast groups */
+  if (bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr)) < 0) {
+    printf("error binding the socket of type=NOTIFY_UBCMTS_SOCK, errno: %s\n",
+           strerror(errno));
+    close(sock_fd);
+    return;
+  }
+  // sleep(15);
+
+  struct timespec start, end;
+  uint64_t acknowledged_txg_ub = 0;
+  for (;;) {
+    std::unique_lock l(ub_notification_mtx);
+    std::cout << __func__ << ": waiting for new uberblock commitment to be "
+                 "acknowledged by kernel, last_txg=" << last_txg
+              << ", global_txg_ub=" << global_txg_ub << "\n";
+    ub_cv.wait(l, [] { 
+      std::cout << __func__ << " last_txg=" << last_txg << ", global_txg_ub=" << global_txg_ub << "\n";
+      return ((last_txg == -1) || (last_txg != global_txg_ub)); }); // sleeps
+
+    last_txg = global_txg_ub;
+
+    // notify kernel
+
+    struct nlmsghdr *nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(512));
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.nl_family = AF_NETLINK;
+    dest_addr.nl_pid = 0;    /* For Linux Kernel */
+    dest_addr.nl_groups = 0; /* unicast */
+
+    /* fill the netlink message header */
+    nlh->nlmsg_len = NLMSG_SPACE(512);
+    nlh->nlmsg_pid = getpid(); /* self pid */
+    nlh->nlmsg_flags = 0;
+
+    char buf[512];
+    memset(buf, 0,
+           512); // maybe copy the global_txg_ub here and add a check in ZFS
+
+    ::memcpy(buf, &global_txg_ub, sizeof(global_txg_ub));
+    /* fill in the netlink message payload */
+    memcpy(NLMSG_DATA(nlh), buf, 512);
+
+    memset(&iov, 0, sizeof(iov));
+    iov.iov_base = (void *)nlh;
+    iov.iov_len = nlh->nlmsg_len;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = (void *)&dest_addr;
+    msg.msg_namelen = sizeof(dest_addr);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    int rc = sendmsg(sock_fd, &msg, 0);
+    if (rc < 0) {
+      printf("error seding the message: %s\n", strerror(errno));
+      close(sock_fd);
+      return;
+    }
+    printf("notify_ubcmts: notification sent already to kernel about new "
+           "uberblock commitment for last_txg=%lu\n",
+           last_txg);
+    total_ops++;
+    free(nlh);
+  }
+}
+
+void Client::notify_kernel_ub(const uint64_t zil_blk_id) {
+  std::cout << __func__ << " " << zil_blk_id << "\n";
+  std::unique_lock<std::mutex> l(ub_notification_mtx);
+  ::memcpy(&global_txg_ub, &zil_blk_id, sizeof(zil_blk_id));
+  ub_cv.notify_all();
+}
+
 void Client::notify_kernel(const char *poolname, const uint64_t zil_blk_id) {
   if (kernel_socket < 0) {
     assert(false);
@@ -2401,9 +2618,8 @@ void Client::notify_kernel(const char *poolname, const uint64_t zil_blk_id) {
   free(tx_msg);
 }
 
-
-
 int Client::http_end_stream(int64_t stream_id) {
+  std::cout << __func__ << " stream_id=" << stream_id << "\n";
   auto it = streams_.find(stream_id);
   if (it == std::end(streams_)) {
     print_system::log_error(std::string(__func__) + " stream_id=" +
@@ -2423,6 +2639,17 @@ int Client::http_end_stream(int64_t stream_id) {
     extract_value(stream->received_data, "ZIL Block ID:</strong> ");
   auto ccf_commit_seqno =
     extract_value(stream->received_data, "CCF Commit Seqno:</strong> ");
+  auto commitment =
+    extract_value(stream->received_data, "Commitment:</strong> ");
+  auto blk_type = extract_value(stream->received_data, "Block Type:</strong> ");
+
+  if (k_print_cmts) {
+    uint64_t cmt[4];
+    memcpy(cmt, commitment.data(), sizeof(cmt));
+    using u_longlong_t = unsigned long long;
+    printf("%016llx:%016llx:%016llx:%016llx\n", (u_longlong_t)cmt[0],
+           (u_longlong_t)cmt[1], (u_longlong_t)cmt[2], (u_longlong_t)cmt[3]);
+  }
   auto now = util::timestamp();
   auto latency_ns = now - stream->transmittion_timestamp;
   auto latency_ms = (latency_ns * 1.0) / 1000000.0;
@@ -2442,42 +2669,42 @@ int Client::http_end_stream(int64_t stream_id) {
   }
 
   if (req_id_count == config.nstreams) {
-    double avg_latency = static_cast<double>(sum_latency_ms) /
-                         static_cast<double>(req_id_count);
+    double avg_latency =
+      static_cast<double>(sum_latency_ms) / static_cast<double>(req_id_count);
     std::string avg_latency_str = std::format("{:.4f}", avg_latency);
     print_system::log(
       std::string(std::string(__func__)) +
       " ALL streams done! nstreams_done_=" + std::to_string(config.nstreams) +
       " avg_latency=" + avg_latency_str + " ms" +
-          "req_id_count= " + std::to_string(req_id_count) 
-);
+      "req_id_count= " + std::to_string(req_id_count));
   }
 
-  if (req_id_count % 500 == 0) {
-    double avg_latency = static_cast<double>(sum_latency_ms) /
-                         static_cast<double>(req_id_count);
+  if (req_id_count % 1 == 0) {
+    double avg_latency =
+      static_cast<double>(sum_latency_ms) / static_cast<double>(req_id_count);
     auto current_duration_in_ns = now - global_start_time_ns;
-    double current_duration_in_sec = (current_duration_in_ns * 1.0) / 1000000000.0;
+    double current_duration_in_sec =
+      (current_duration_in_ns * 1.0) / 1000000000.0;
     double ops_per_s = (req_id_count * 1.0) / (current_duration_in_sec * 1.0);
     std::string avg_throughput_str = std::format("{:.4f}", ops_per_s);
     std::string avg_latency_str = std::format("{:.4f}", avg_latency);
+    std::string b_type =
+      ((std::stoi(blk_type) == block_type::TAIL) ? "TAIL" : "UB");
     print_system::log(
-      "req_id_count= " + std::to_string(req_id_count) +
-      " stream_id=" + std::to_string(stream_id) +
+      "req_id_count= " + std::to_string(req_id_count) + " blk_type(" +
+      blk_type + ")=" + b_type + " stream_id=" + std::to_string(stream_id) +
       " latency=" + std::to_string(latency_ms) +
       " ms (tx_ts=" + std::to_string(stream->transmittion_timestamp) +
       ", rx_ts=" + std::to_string(now) + ")" + " request_id=" + request_id +
       " zil_blk_id=" + zil_blk_id + " ccf_commit_seqno=" + ccf_commit_seqno +
       " nstreams_done_=" + std::to_string(nstreams_done_) +
       " config.nstreams=" + std::to_string(config.nstreams) +
-      " avg_latency=" + avg_latency_str + " ms" + 
-      " avg throuhgput (requests/sec) = " + avg_throughput_str + 
-      " res=" +
-      ((req_id_count == config.nstreams) ? "true" : "false"));
-   // std::cout << stream->received_data << "\n\n";
-      //std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      " avg_latency=" + avg_latency_str + " ms" +
+      " avg throuhgput (requests/sec) = " + avg_throughput_str +
+      " res=" + ((req_id_count == config.nstreams) ? "true" : "false"));
+    // std::cout << stream->received_data << "\n\n";
+    // std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-
 
 #if 0
   if (std::stoi(request_id) == config.nstreams) {
@@ -2490,7 +2717,7 @@ int Client::http_end_stream(int64_t stream_id) {
       " avg_latency=" + avg_latency_str + " ms");
   }
 
-  if (std::stoi(request_id) % 500 == 0) {
+  if (std::stoi(request_id) % 1 == 0) {
     double avg_latency = static_cast<double>(sum_latency_ms) /
                          static_cast<double>(std::stoi(request_id));
     auto current_duration_in_ns = now - global_start_time_ns;
@@ -2507,23 +2734,28 @@ int Client::http_end_stream(int64_t stream_id) {
       " nstreams_done_=" + std::to_string(nstreams_done_) +
       " config.nstreams=" + std::to_string(config.nstreams) +
       " avg_latency=" + avg_latency_str + " ms" + 
-      " avg throuhgput (requests/sec) = " + avg_throughput_str + 
+      " avg throughput (requests/sec) = " + avg_throughput_str + 
       " res=" +
       ((std::stoi(request_id) == config.nstreams) ? "true" : "false"));
    // std::cout << stream->received_data << "\n\n";
       // std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 #endif
-  
-  if (kernel_socket > 0 && std::stoi(zil_blk_id) != 0)
+
+  if (kernel_socket > 0 && (std::stoi(zil_blk_id) != 0) &&
+      (std::stoi(blk_type) == block_type::TAIL)) {
     notify_kernel("zpool", std::stoi(zil_blk_id));
+  }
+  if ((std::stoi(blk_type) == block_type::UB)) {
+    notify_kernel_ub(std::stoi(zil_blk_id));
+  }
   return 0;
 }
 
 void Client::create_socket_kernel() {
   struct sockaddr_nl src_addr;
   // @dimitra: uncomment me to disable kernel notification
-  // kernel_socket = -1;
+  //kernel_socket = -1;
   //return;
   kernel_socket = socket(PF_NETLINK, SOCK_RAW, NOTIFY_CMTS_SOCK);
   if (kernel_socket < 0) {
@@ -3090,6 +3322,12 @@ zfs_userspace_client::zfs_userspace_client(void *poolname) {
     std::thread(&zfs_userspace_client::thread_func_get_cmt, this, poolname);
 }
 
+zfs_ub_userspace_client::zfs_ub_userspace_client(void *poolname) {
+  print_system::log_info("Starting zfs_ub_userspace_client cmt thread.");
+  agent_thread =
+    std::thread(&zfs_ub_userspace_client::thread_func_get_cmt, this, poolname);
+}
+
 int Client::create_local_endpoint_receiver_userspace() {
   auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
@@ -3099,22 +3337,29 @@ int Client::create_local_endpoint_receiver_userspace() {
 
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;          // listen on all interfaces
-  server_addr.sin_port = htons(k_local_server_port); // port number
+  server_addr.sin_addr.s_addr = INADDR_ANY; // listen on all interfaces
+  server_addr.sin_port =
+    htons(k_local_server_port + k_client_id); // port number
+  std::cout << __func__ << " server_addr.sin_port=" << server_addr.sin_port
+            << "\n";
 
   if (bind(server_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    std::string print_msg =
-      std::string(std::string(__func__)) + " could not bind to port " +
-      std::to_string(k_local_server_port) + ", Error=" + std::strerror(errno);
+    std::string print_msg = std::string(std::string(__func__)) +
+                            " could not bind to port " +
+                            std::to_string(k_local_server_port + k_client_id) +
+                            ", Error=" + std::strerror(errno);
+    std::cout << print_msg << std::endl;
     print_system::log_error(print_msg);
     close(server_fd);
     return -1;
   }
 
   if (listen(server_fd, 5) < 0) {
-    std::string print_msg =
-      std::string(std::string(__func__)) + " could not listen on port " +
-      std::to_string(k_local_server_port) + ", Error=" + std::strerror(errno);
+    std::string print_msg = std::string(std::string(__func__)) +
+                            " could not listen on port " +
+                            std::to_string(k_local_server_port + k_client_id) +
+                            ", Error=" + std::strerror(errno);
+    std::cout << print_msg << std::endl;
     print_system::log_error(print_msg);
     close(server_fd);
     return -1;
@@ -3130,7 +3375,7 @@ int Client::create_local_endpoint_receiver_userspace() {
   if (accepted_socket < 0) {
     std::string print_msg = std::string(std::string(__func__)) +
                             " could not accept connection on port " +
-                            std::to_string(k_local_server_port) +
+                            std::to_string(k_local_server_port + k_client_id) +
                             ", Error=" + std::strerror(errno);
     print_system::log_error(print_msg);
 
@@ -3152,6 +3397,116 @@ int Client::create_local_endpoint_receiver_userspace() {
   return accepted_socket;
 }
 
+int Client::create_local_endpoint_ub_receiver_userspace() {
+  auto server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd < 0) {
+    print_system::log_error("socket creation failed");
+    return -1;
+  }
+
+  sockaddr_in server_addr{};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY; // listen on all interfaces
+  server_addr.sin_port =
+    htons(k_local_server_port_ub + k_client_id); // port number
+  std::cout << __func__ << " server_addr.sin_port=" << server_addr.sin_port
+            << "\n";
+
+  if (bind(server_fd, (sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    std::string print_msg =
+      std::string(std::string(__func__)) + " could not bind to port " +
+      std::to_string(k_local_server_port_ub + k_client_id) +
+      ", Error=" + std::strerror(errno);
+    std::cout << print_msg << std::endl;
+    print_system::log_error(print_msg);
+    close(server_fd);
+    return -1;
+  }
+
+  if (listen(server_fd, 5) < 0) {
+    std::string print_msg =
+      std::string(std::string(__func__)) + " could not listen on port " +
+      std::to_string(k_local_server_port_ub + k_client_id) +
+      ", Error=" + std::strerror(errno);
+    std::cout << print_msg << std::endl;
+    print_system::log_error(print_msg);
+    close(server_fd);
+    return -1;
+  }
+
+  print_system::log_info(
+    "Local endpoint on receiver userspace (for UB) side created successfully.");
+
+  sockaddr_in client_addr{};
+  socklen_t client_len = sizeof(client_addr);
+  int accepted_socket =
+    accept(server_fd, (sockaddr *)&client_addr, &client_len);
+  if (accepted_socket < 0) {
+    std::string print_msg =
+      std::string(std::string(__func__)) +
+      " could not accept connection on port " +
+      std::to_string(k_local_server_port_ub + k_client_id) +
+      ", Error=" + std::strerror(errno);
+    print_system::log_error(print_msg);
+
+    close(server_fd);
+    return -1;
+  }
+
+  // set the socket to non-blocking mode
+  int flags = fcntl(accepted_socket, F_GETFL, 0);
+  if (flags == -1) {
+    close(accepted_socket);
+    return -1;
+  }
+
+  if (fcntl(accepted_socket, F_SETFL, flags | O_NONBLOCK) == -1) {
+    close(accepted_socket);
+    return -1;
+  }
+  return accepted_socket;
+}
+
+int zfs_ub_userspace_client::create_local_endpoint_sender_userspace() {
+  int sender_socket = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+  if (sender_socket < 0) {
+    print_system::log_error("socket creation failed");
+    return -1;
+  }
+
+  sockaddr_in server_addr{};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port =
+    htons(k_local_server_port_ub + k_client_id); // port number
+  std::cout << __func__ << " server_addr.sin_port=" << server_addr.sin_port
+            << "\n";
+  // convert IP address from text to binary
+  if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
+    close(sender_socket);
+    return -1;
+  }
+
+  // connect to the server
+  if (connect(sender_socket, (sockaddr *)&server_addr, sizeof(server_addr)) <
+      0) {
+    close(sender_socket);
+    return -1;
+  }
+
+  // set the socket to non-blocking mode
+  int flags = fcntl(sender_socket, F_GETFL, 0);
+  if (flags == -1) {
+    close(sender_socket);
+    return -1;
+  }
+
+  if (fcntl(sender_socket, F_SETFL, flags | O_NONBLOCK) == -1) {
+    close(sender_socket);
+    return -1;
+  }
+  return sender_socket;
+}
+
 int zfs_userspace_client::create_local_endpoint_sender_userspace() {
   int sender_socket = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
   if (sender_socket < 0) {
@@ -3161,8 +3516,10 @@ int zfs_userspace_client::create_local_endpoint_sender_userspace() {
 
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(k_local_server_port); // port number
-
+  server_addr.sin_port =
+    htons(k_local_server_port + k_client_id); // port number
+  std::cout << __func__ << " server_addr.sin_port=" << server_addr.sin_port
+            << "\n";
   // convert IP address from text to binary
   if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
     close(sender_socket);
@@ -3198,6 +3555,16 @@ void zfs_userspace_client::notify_quic_client_thread(const int local_socket) {
   send(local_socket, "Hello from cmt thread", 22, 0);
 }
 
+void zfs_ub_userspace_client::notify_quic_client_thread(
+  const int local_socket) {
+  static uint64_t notifications_counter = 0;
+  notifications_counter++;
+  // print_system::log_info("Notifying quic client thread from cmt thread "+
+  // std::to_string(notifications_counter) + "\n");
+  // std::cout << "Notifying quic client thread from cmt thread " <<  std::to_string(notifications_counter) << "\n";
+  send(local_socket, "Hello from cmt thread", 22, 0);
+}
+
 static size_t max_buffer_size() {
   return (sizeof(get_cmt_msg_t) > sizeof(recv_cmt_msg_t))
            ? sizeof(get_cmt_msg_t)
@@ -3218,16 +3585,16 @@ void zfs_userspace_client::get_commitment(
 #if 1
     // std::this_thread::sleep_for(
     //  std::chrono::microseconds(1000 /*uni_dist[idx % n_samples]*10*/));
-    std::this_thread::sleep_for(
-      std::chrono::microseconds(1000));
+    std::this_thread::sleep_for(std::chrono::microseconds(1000));
     recv_cmt_msg_t *recv_msg = new recv_cmt_msg_t();
-    recv_msg->blk_id = idx; 
+    recv_msg->blk_id = idx;
     strncpy(recv_msg->poolname, poolname, ZFS_MAX_DATASET_NAME_LEN);
-  //   printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
-  //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
-  // todo: push the cmt to a queue.
-  //std::cout << "Simulated cmt received for blk_id=" << recv_msg->blk_id << "\n";
-  recv_queue.push(recv_msg); // push the received message to the queue
+    //   printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
+    //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
+    // todo: push the cmt to a queue.
+    std::cout << "Simulated cmt received for blk_id=" << recv_msg->blk_id <<
+     "\n";
+    recv_queue.push(recv_msg); // push the received message to the queue
 #endif
     return;
   }
@@ -3282,15 +3649,165 @@ void zfs_userspace_client::get_commitment(
 
   recv_cmt_msg_t *recv_msg =
     deserialize_recv_cmt(reinterpret_cast<char *>(NLMSG_DATA(nlh)));
-
-  //   printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
-  //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
+  recv_msg->blk_type = TAIL;
+  printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
+           recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
   // todo: push the cmt to a queue.
-  
+
   recv_queue.push(recv_msg); // push the received message to the queue
 
-  //std::this_thread::sleep_for(std::chrono::microseconds(10000));
+  // std::this_thread::sleep_for(std::chrono::microseconds(10000));
   free(nlh);
+}
+
+int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
+                                             const char *poolname) {
+  static int idx = 0;
+  idx++;
+  struct iovec iov;
+  struct msghdr msg;
+  char head_ub_commitment[512];
+  static uint64_t prev_ub_txg = -1;
+  static uint64_t prev_zil_head_blk_num = -1;
+  ::memset(head_ub_commitment, 0, sizeof(head_ub_commitment));
+  if (kernel_endpoint < 0) {
+#if 1
+    std::this_thread::sleep_for(std::chrono::microseconds(1000));
+    recv_cmt_msg_t *recv_msg = new recv_cmt_msg_t();
+    recv_msg->blk_id = idx;
+    recv_msg->blk_type = UB;
+    strncpy(recv_msg->poolname, poolname, ZFS_MAX_DATASET_NAME_LEN);
+    recv_queue.push(recv_msg); // push the received message to the queue
+#endif
+    return 1;
+  }
+
+  
+  struct sockaddr_nl src_addr, dest_addr;
+  memset(&dest_addr, 0, sizeof(dest_addr));
+  dest_addr.nl_family = AF_NETLINK;
+  dest_addr.nl_pid = 0;    /* For Linux Kernel */
+  dest_addr.nl_groups = 0; /* unicast */
+
+  struct nlmsghdr *nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(512));
+
+  /* fill the netlink message header */
+  nlh->nlmsg_len = NLMSG_SPACE(512);
+  nlh->nlmsg_pid = getpid(); /* self pid */
+  nlh->nlmsg_flags = 0;
+
+  memset(&iov, 0, sizeof(iov));
+  iov.iov_base = (void *)nlh;
+  iov.iov_len = nlh->nlmsg_len;
+
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_name = (void *)&dest_addr;
+  msg.msg_namelen = sizeof(dest_addr);
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+
+  /* fill in the netlink message payload */
+  memcpy(NLMSG_DATA(nlh), head_ub_commitment, 512);
+
+  //std::cout << __func__ << " send\n";
+  int rc = sendmsg(kernel_endpoint, &msg, 0);
+  if (rc < 0) {
+    printf("error sending the message: %s\n", strerror(errno));
+    close(kernel_endpoint);
+    exit(1);
+    return -1;
+  }
+
+  /* read message from kernel */
+  memset(nlh, 0, NLMSG_SPACE(512));
+
+  //std::cout << __func__ << " recv\n";
+  rc = recvmsg(kernel_endpoint, &msg, 0);
+  if (rc < 0) {
+    printf("recvmsg: error in receiving the msg from kernel: %s\n",
+           strerror(errno));
+    close(kernel_endpoint);
+    exit(1);
+  }
+
+  
+  std::unique_ptr<char[]> recv_msg = std::make_unique<char[]>(512);
+  ::memcpy(recv_msg.get(), reinterpret_cast<char *>(NLMSG_DATA(nlh)), 512);
+
+  for (auto i = 0; i < 512; i++) {
+    //std::cout << std::to_string(recv_msg.get()[i]);
+  }
+  //std::cout << "\n";
+
+  size_t offset = 0;
+  uint64_t head_digest[4];
+  uint64_t ub_txg = 0, zil_head_blk_num = 0;
+  memcpy(&ub_txg, recv_msg.get(), sizeof(ub_txg));
+  offset += sizeof(ub_txg);
+  if (ub_txg != prev_ub_txg)
+    printf("ub_txg=%llu, offset=%llu\n", (u_longlong_t)ub_txg,
+           (u_longlong_t)offset);
+  offset += 65;
+  memcpy(&zil_head_blk_num, recv_msg.get() + offset, sizeof(zil_head_blk_num));
+  offset += sizeof(zil_head_blk_num);
+  if (zil_head_blk_num != prev_zil_head_blk_num)
+    printf("zil_head_blk_num=%llu (%016llx), offset=%llu\n",
+           (u_longlong_t)zil_head_blk_num, (u_longlong_t)zil_head_blk_num,
+           (u_longlong_t)offset);
+  memcpy(head_digest, recv_msg.get() + offset, sizeof(head_digest));
+  offset += sizeof(head_digest);
+  if (zil_head_blk_num != prev_zil_head_blk_num)
+    printf("head_digest=%016llx:%016llx:%016llx:%016llx\n",
+           (u_longlong_t)head_digest[0], (u_longlong_t)head_digest[1],
+           (u_longlong_t)head_digest[2], (u_longlong_t)head_digest[3]);
+
+  
+  int ret_val = 0;
+  if (ub_txg != prev_ub_txg || zil_head_blk_num != prev_zil_head_blk_num) {
+
+    recv_cmt_msg_t *_recv_msg_ = new recv_cmt_msg_t();
+    _recv_msg_->blk_id = ub_txg; // zil_head_blk_num;
+    _recv_msg_->blk_type = UB;
+    memcpy(&(_recv_msg_->tail_commitment), head_digest, sizeof(head_digest));
+    printf("push at the queue: ub_txg=%llu zil_head_blk_num=%llu (%016llx)\n",
+          (u_longlong_t)ub_txg,
+           (u_longlong_t)zil_head_blk_num, (u_longlong_t)zil_head_blk_num);
+   
+    recv_queue.push(_recv_msg_); // push the received message to the queue
+    ret_val = 1;
+  }
+  prev_ub_txg = ub_txg;
+  prev_zil_head_blk_num = zil_head_blk_num;
+  
+
+  usleep(1000); //
+  free(nlh);
+  return ret_val;
+}
+
+int zfs_ub_userspace_client::create_local_endpoint_receiver_kernelspace() {
+  // @dimitra: uncomment to disable getting cmts from kernel
+  //return -1;
+  int kernel_socket = socket(PF_NETLINK, SOCK_RAW, GET_UBCMTS_SOCK);
+
+  if (kernel_socket < 0) {
+    print_system::log_error(
+      "error in creating the socket of type=GET_UBCMTS_SOCK");
+    return -1;
+  }
+  struct sockaddr_nl src_addr;
+  memset(&src_addr, 0, sizeof(src_addr));
+  src_addr.nl_family = AF_NETLINK;
+  src_addr.nl_pid = getpid(); /* self pid */
+  src_addr.nl_groups = 0;     /* not in mcast groups */
+  if (bind(kernel_socket, (struct sockaddr *)&src_addr, sizeof(src_addr)) < 0) {
+    print_system::log_error(
+      "error binding the socket of type=GET_UBCMTS_SOCK, errno: " +
+      std::string(strerror(errno)));
+    close(kernel_socket);
+    return -1;
+  }
+  return kernel_socket;
 }
 
 int zfs_userspace_client::create_local_endpoint_receiver_kernelspace() {
@@ -3348,6 +3865,31 @@ void zfs_userspace_client::thread_func_get_cmt(void *args_poolname) {
   }
 }
 
+void zfs_ub_userspace_client::thread_func_get_cmt(void *args_poolname) {
+  print_system::log_info("Thread for getting cmts started.");
+
+  std::this_thread::sleep_for(std::chrono::seconds(15));
+  int local_sender_socket = create_local_endpoint_sender_userspace();
+  if (local_sender_socket < 0) {
+    print_system::log_error(
+      "Could not create local endpoint on sender userspace side.");
+    return;
+  }
+  print_system::log_info(
+    "Local endpoint on sender userspace side created successfully.");
+
+  char poolname[ZFS_MAX_DATASET_NAME_LEN];
+  memcpy(poolname, reinterpret_cast<char *>(args_poolname),
+         strlen(reinterpret_cast<char *>(args_poolname)));
+  static uint64_t expected_blk_id = 0;
+  int kernel_endpoint_recv = create_local_endpoint_receiver_kernelspace();
+  for (;;) {
+    expected_blk_id++;
+    if (get_commitment(kernel_endpoint_recv, poolname) > 0)
+      notify_quic_client_thread(local_sender_socket);
+  }
+}
+
 /// ======= zfs_userspace_client  =======
 
 int main(int argc, char **argv) {
@@ -3356,6 +3898,8 @@ int main(int argc, char **argv) {
   const char *private_key_file = nullptr;
   const char *cert_file = nullptr;
   std::unique_ptr<zfs_userspace_client> zfs_client;
+  std::unique_ptr<zfs_ub_userspace_client> zfs_ub_client;
+  std::thread ub_thread;
   if (argc) {
     prog = basename(argv[0]);
   }
@@ -3416,6 +3960,8 @@ int main(int argc, char **argv) {
       {"initial-pkt-num", required_argument, &flag, 42},
       {"pmtud-probes", required_argument, &flag, 43},
       {"poolname", required_argument, &flag, 44},
+      {"print_cmts", no_argument, &flag, 45},
+      {"client_id", required_argument, &flag, 46},
       {},
     };
 
@@ -3862,6 +4408,18 @@ int main(int argc, char **argv) {
       case 44: {
         zfs_client =
           std::make_unique<zfs_userspace_client>(static_cast<char *>(optarg));
+
+        zfs_ub_client = std::make_unique<zfs_ub_userspace_client>(static_cast<char *>(optarg));
+        ub_thread = std::thread(ub_notification_thread);
+        break;
+      }
+      case 45: {
+        k_print_cmts = true;
+        break;
+      }
+      case 46: {
+        k_client_id = *util::parse_uint_iec(optarg);
+        break;
       }
       }
       break;
@@ -4003,5 +4561,6 @@ int main(int argc, char **argv) {
     }
   }
 
+  ub_thread.join();
   return EXIT_SUCCESS;
 }
