@@ -220,7 +220,7 @@ void timeoutcb_requests(struct ev_loop *loop, ev_timer *w, int revents) {
 namespace {
 void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
   int rv;
-  std::cout << __func__ << "\n";
+  // std::cout << __func__ << "\n";
   auto c = static_cast<Client *>(w->data);
   if (revents & EV_READ) {
     char buffer[1024];
@@ -237,7 +237,7 @@ void get_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
     }
   }
 
-  std::cout << __func__ << " calling into on_extend_max_streams\n";
+  // std::cout << __func__ << " calling into on_extend_max_streams\n";
 
   c->on_extend_max_streams();
   c->on_write();
@@ -266,7 +266,7 @@ void get_ub_notification_cb(struct ev_loop *loop, ev_io *w, int revents) {
     }
   }
 
-  std::cout << __func__ << " calling into on_extend_max_streams\n";
+  // std::cout << __func__ << " calling into on_extend_max_streams\n";
 
   c->on_extend_max_streams();
   c->on_write();
@@ -2039,7 +2039,7 @@ int Client::on_extend_max_streams() {
                          ": nstreams_done_=" + std::to_string(nstreams_done_));
 #endif
   //
-  std::cout << __func__ << " nstreams_done_=" << nstreams_done_ << "\n";
+  // std::cout << __func__ << " nstreams_done_=" << nstreams_done_ << "\n";
   while (!recv_queue.empty()) {
   //  for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
   // if (nstreams_done_ < config.nstreams) 
@@ -2078,7 +2078,7 @@ int Client::on_extend_max_streams() {
     if (last_cmt != nullptr) {
       // stream->sent_data = std::to_string(last_cmt->blk_id);
       stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
-                               sizeof(int));
+                               sizeof(int) + sizeof(int));
       ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
 
       #if 0
@@ -2105,7 +2105,10 @@ int Client::on_extend_max_streams() {
                last_cmt->tail_commitment, COMMITMENT_SIZE);
       ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
                &(last_cmt->blk_type), sizeof(int));
-      std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
+      auto tmp = (k_client_id == -1) ? 0 : k_client_id;
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int),
+               &tmp, sizeof(int));
+      // std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
       free(last_cmt);
     } else {
       // return 0;
@@ -2506,11 +2509,13 @@ void ub_notification_thread() {
   uint64_t acknowledged_txg_ub = 0;
   for (;;) {
     std::unique_lock l(ub_notification_mtx);
+    #if 0
     std::cout << __func__ << ": waiting for new uberblock commitment to be "
                  "acknowledged by kernel, last_txg=" << last_txg
               << ", global_txg_ub=" << global_txg_ub << "\n";
+    #endif
     ub_cv.wait(l, [] { 
-      std::cout << __func__ << " last_txg=" << last_txg << ", global_txg_ub=" << global_txg_ub << "\n";
+      //std::cout << __func__ << " last_txg=" << last_txg << ", global_txg_ub=" << global_txg_ub << "\n";
       return ((last_txg == -1) || (last_txg != global_txg_ub)); }); // sleeps
 
     last_txg = global_txg_ub;
@@ -2552,16 +2557,18 @@ void ub_notification_thread() {
       close(sock_fd);
       return;
     }
+    #if 0
     printf("notify_ubcmts: notification sent already to kernel about new "
            "uberblock commitment for last_txg=%lu\n",
            last_txg);
+    #endif
     total_ops++;
     free(nlh);
   }
 }
 
 void Client::notify_kernel_ub(const uint64_t zil_blk_id) {
-  std::cout << __func__ << " " << zil_blk_id << "\n";
+  //std::cout << __func__ << " " << zil_blk_id << "\n";
   std::unique_lock<std::mutex> l(ub_notification_mtx);
   ::memcpy(&global_txg_ub, &zil_blk_id, sizeof(zil_blk_id));
   ub_cv.notify_all();
@@ -2619,7 +2626,7 @@ void Client::notify_kernel(const char *poolname, const uint64_t zil_blk_id) {
 }
 
 int Client::http_end_stream(int64_t stream_id) {
-  std::cout << __func__ << " stream_id=" << stream_id << "\n";
+  // std::cout << __func__ << " stream_id=" << stream_id << "\n";
   auto it = streams_.find(stream_id);
   if (it == std::end(streams_)) {
     print_system::log_error(std::string(__func__) + " stream_id=" +
@@ -2679,7 +2686,7 @@ int Client::http_end_stream(int64_t stream_id) {
       "req_id_count= " + std::to_string(req_id_count));
   }
 
-  if (req_id_count % 1 == 0) {
+  if (req_id_count % 2500 == 0) {
     double avg_latency =
       static_cast<double>(sum_latency_ms) / static_cast<double>(req_id_count);
     auto current_duration_in_ns = now - global_start_time_ns;
@@ -3650,8 +3657,9 @@ void zfs_userspace_client::get_commitment(
   recv_cmt_msg_t *recv_msg =
     deserialize_recv_cmt(reinterpret_cast<char *>(NLMSG_DATA(nlh)));
   recv_msg->blk_type = TAIL;
-  printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
-           recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
+
+  // printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
+  //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
   // todo: push the cmt to a queue.
 
   recv_queue.push(recv_msg); // push the received message to the queue
@@ -3780,7 +3788,7 @@ int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
   prev_zil_head_blk_num = zil_head_blk_num;
   
 
-  usleep(1000); //
+  usleep(10); //
   free(nlh);
   return ret_val;
 }
@@ -3885,8 +3893,11 @@ void zfs_ub_userspace_client::thread_func_get_cmt(void *args_poolname) {
   int kernel_endpoint_recv = create_local_endpoint_receiver_kernelspace();
   for (;;) {
     expected_blk_id++;
+    // usleep(100000);
+    #if 1
     if (get_commitment(kernel_endpoint_recv, poolname) > 0)
       notify_quic_client_thread(local_sender_socket);
+    #endif
   }
 }
 
