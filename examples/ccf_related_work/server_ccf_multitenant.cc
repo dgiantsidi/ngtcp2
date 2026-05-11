@@ -785,9 +785,20 @@ Handler::~Handler() {
     std::cerr << scid_ << " Closing QUIC connection " << std::endl;
   }
 
+  std::cout << __PRETTY_FUNCTION__ << " 1\n";
   ev_timer_stop(loop_, &timer_);
+  std::cout << __PRETTY_FUNCTION__ << " 2\n";
   ev_io_stop(loop_, &wev_);
-  ev_timer_stop(loop_, &response_timer);
+  std::cout << __PRETTY_FUNCTION__ << " 3\n";
+  // ev_timer_stop(loop_, &response_timer);
+  auto& lw = server_->get_local_wev_();
+  if (lw.data == this) {
+    if (ev_is_active(&lw)) {
+      ev_io_stop(loop_, &lw);
+    }
+    lw.data = nullptr;
+  }
+  std::cout << __PRETTY_FUNCTION__ << " 4\n";
 
   if (httpconn_) {
     nghttp3_conn_del(httpconn_);
@@ -4485,6 +4496,7 @@ int main(int argc, char **argv) {
   s.disconnect();
   s.close();
 
+  std::cout << __PRETTY_FUNCTION__ << " finished" << std::endl;
   return EXIT_SUCCESS;
 }
 #endif
