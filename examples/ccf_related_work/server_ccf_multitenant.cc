@@ -800,6 +800,7 @@ Handler::~Handler() {
   }
   std::cout << __PRETTY_FUNCTION__ << " 4\n";
 
+  server()->ccf_print();
   if (httpconn_) {
     nghttp3_conn_del(httpconn_);
   }
@@ -2504,6 +2505,7 @@ void siginthandler(struct ev_loop *loop, ev_signal *watcher, int revents) {
   ev_break(loop, EVBREAK_ALL);
 }
 } // namespace
+
 
 Server::Server(struct ev_loop *loop, TLSServerContext &tls_ctx, int id)
   : loop_(loop),
