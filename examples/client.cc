@@ -60,6 +60,7 @@ static double sum_latency_ms = 0;
 static uint64_t global_start_time_ns = 0;
 bool k_print_cmts = false;
 static int k_client_id = -1;
+static int k_attestation_id = -1;
 
 
 std::mutex ub_notification_mtx;
@@ -2078,7 +2079,7 @@ int Client::on_extend_max_streams() {
     if (last_cmt != nullptr) {
       // stream->sent_data = std::to_string(last_cmt->blk_id);
       stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
-                               sizeof(int) + sizeof(int));
+                               sizeof(int) + sizeof(int) + sizeof(int));
       ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
 
       #if 0
@@ -2108,6 +2109,8 @@ int Client::on_extend_max_streams() {
       auto tmp = (k_client_id == -1) ? 0 : k_client_id;
       ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int),
                &tmp, sizeof(int));
+       ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int),
+               &k_attestation_id, sizeof(int));
       // std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
       free(last_cmt);
     } else {
@@ -2479,7 +2482,7 @@ static std::string extract_value(const std::string &body,
 }
 
 void ub_notification_thread() {
-  static uint64_t last_txg = -1;
+  static uint64_t last_txg = 0;
   struct sockaddr_nl src_addr, dest_addr;
   struct msghdr msg;
   struct iovec iov;
@@ -2509,14 +2512,16 @@ void ub_notification_thread() {
   uint64_t acknowledged_txg_ub = 0;
   for (;;) {
     std::unique_lock l(ub_notification_mtx);
-    #if 0
+    #if 1
     std::cout << __func__ << ": waiting for new uberblock commitment to be "
                  "acknowledged by kernel, last_txg=" << last_txg
               << ", global_txg_ub=" << global_txg_ub << "\n";
     #endif
     ub_cv.wait(l, [] { 
-      //std::cout << __func__ << " last_txg=" << last_txg << ", global_txg_ub=" << global_txg_ub << "\n";
-      return ((last_txg == -1) || (last_txg != global_txg_ub)); }); // sleeps
+      std::cout << __func__ << " last_txg=" << last_txg << ", global_txg_ub=" << global_txg_ub << "\n";
+      return ((last_txg != global_txg_ub)); }); // sleeps
+
+    std::cout << __func__ << "> last_txg=" << last_txg << ", global_txg_ub=" << global_txg_ub << "\n";
 
     last_txg = global_txg_ub;
 
@@ -2568,8 +2573,8 @@ void ub_notification_thread() {
 }
 
 void Client::notify_kernel_ub(const uint64_t zil_blk_id) {
-  //std::cout << __func__ << " " << zil_blk_id << "\n";
   std::unique_lock<std::mutex> l(ub_notification_mtx);
+  std::cout << __func__ << " " << zil_blk_id << "\n";
   ::memcpy(&global_txg_ub, &zil_blk_id, sizeof(zil_blk_id));
   ub_cv.notify_all();
 }
@@ -3973,6 +3978,7 @@ int main(int argc, char **argv) {
       {"poolname", required_argument, &flag, 44},
       {"print_cmts", no_argument, &flag, 45},
       {"client_id", required_argument, &flag, 46},
+      {"attestation_id", required_argument, &flag, 47},
       {},
     };
 
@@ -4430,6 +4436,10 @@ int main(int argc, char **argv) {
       }
       case 46: {
         k_client_id = *util::parse_uint_iec(optarg);
+        break;
+      }
+      case 47: {
+        k_attestation_id = *util::parse_uint_iec(optarg);
         break;
       }
       }
