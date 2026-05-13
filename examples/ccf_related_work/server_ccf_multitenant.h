@@ -154,6 +154,9 @@ struct Stream {
   int64_t find_dyn_length(const std::string_view &path);
   void http_acked_stream_data(uint64_t datalen);
 
+  bool is_register_request() const {
+    return method == "REGISTER";
+  }
   int64_t stream_id;
   Handler *handler;
   // uri is request uri/path.
@@ -268,6 +271,7 @@ private:
   FILE *qlog_;
   ngtcp2_cid scid_;
   nghttp3_conn *httpconn_;
+  int registered_fs_id, registered_attestation_id;
   std::unordered_map<int64_t, std::unique_ptr<Stream>> streams_;
   // conn_closebuf_ contains a packet which contains CONNECTION_CLOSE.
   // This packet is repeatedly sent as a response to the incoming

@@ -55,7 +55,7 @@
 #include "../template.h"
 
 #include "config.h"
-
+#include <map>
 using namespace ngtcp2;
 using namespace std::literals;
 
@@ -87,6 +87,12 @@ void wait_monitor() {
   monitor_cv.wait(lock);
 }
 } // namespace synchronization
+
+
+using filesystem_id = int;
+using emphemeral_attestation_id = int;
+std::mutex attestation_store_mutex;
+std::map<filesystem_id, emphemeral_attestation_id> attestation_store; // key: fs_id, value: attestation_id
 
 
 Stream::Stream(int64_t stream_id, Handler *handler)
@@ -499,8 +505,9 @@ int Stream::start_response(nghttp3_conn *httpconn,
   if (method == "PUT")
     return send_status_response(httpconn, 200, {}, std::move(request));
 
-  if (method == "REGISTER")
+  if (method == "REGISTER") {
     return send_status_response(httpconn, 200, {}, std::move(request));
+  }
 
   if (uri.empty() || method.empty()) {
     return send_status_response(httpconn, 400);
@@ -788,11 +795,8 @@ Handler::~Handler() {
     std::cerr << scid_ << " Closing QUIC connection " << std::endl;
   }
 
-  std::cout << __PRETTY_FUNCTION__ << " 1\n";
   ev_timer_stop(loop_, &timer_);
-  std::cout << __PRETTY_FUNCTION__ << " 2\n";
   ev_io_stop(loop_, &wev_);
-  std::cout << __PRETTY_FUNCTION__ << " 3\n";
   // ev_timer_stop(loop_, &response_timer);
   auto& lw = server_->get_local_wev_();
   if (lw.data == this) {
@@ -801,7 +805,10 @@ Handler::~Handler() {
     }
     lw.data = nullptr;
   }
-  std::cout << __PRETTY_FUNCTION__ << " 4\n";
+
+  std::lock_guard<std::mutex> lock(attestation_store_mutex);
+  attestation_store.erase(registered_fs_id);
+  std::cerr << " Closing QUIC connection for fs_id=" << registered_fs_id << std::endl;
 
   server()->ccf_print();
   if (httpconn_) {
@@ -1370,10 +1377,32 @@ int Handler::http_end_stream(Stream *stream) {
       " received_data.size=" + std::to_string(stream->received_data.size()) +
       " count=" + std::to_string(count));
 #endif
-    if (count < 5 && special_stream(stream->stream_id)) {
-      // stream->received_data.size() == 0) {
+
+    if (stream->is_register_request()) {
+      // register fs_id and attestation_id
+      uint64_t fs_id, attestation_id;
+      int blk_type;
+      ::memcpy(&fs_id, stream->received_data.data(), sizeof(uint64_t));
+      ::memcpy(&attestation_id, stream->received_data.data() + sizeof(uint64_t), sizeof(uint64_t));
+      ::memcpy(&blk_type, stream->received_data.data() + sizeof(uint64_t)*2, sizeof(int));
+      std::lock_guard<std::mutex> lock(attestation_store_mutex);
+      if (attestation_store.find(fs_id) == attestation_store.end()) {
+        std::cout << "[*] " << __func__ << " register fs_id=" << fs_id << " attestation_id=" << attestation_id << "\n";
+        attestation_store[fs_id] = attestation_id;
+        registered_fs_id = fs_id;
+        registered_attestation_id = attestation_id;
+      }
+      else {
+        std::cout << "[*] " << __func__ << " fs_id=" << fs_id << " already registered with attestation_id=" << attestation_store[fs_id] << "\n";
+        // should return error message.
+      }
       return start_response(stream);
     }
+    if (count < 5 && special_stream(stream->stream_id)) {
+      return start_response(stream);
+    }
+
+   
     auto item = std::make_unique<queue_item>();
     item->stream = stream;
     item->handler = this;
@@ -1386,9 +1415,7 @@ int Handler::http_end_stream(Stream *stream) {
     // std::cout << __PRETTY_FUNCTION__ << " handler " << static_cast<void*>(this) << std::endl;
     int blk_type = -1;
     if (stream->received_data.size() > 0) {
-      // auto &id_str = stream->received_data;
-      // item->request->zil_blk_id = std::stoll(id_str);
-      uint64_t zil_blk_id = 2;
+      uint64_t zil_blk_id;
       ::memcpy(&zil_blk_id, stream->received_data.data(), sizeof(uint64_t));
       item->request->zil_blk_id = zil_blk_id;
       constexpr size_t k_commitment_sz = 32;
@@ -1403,6 +1430,14 @@ int Handler::http_end_stream(Stream *stream) {
        // std::cout << __func__ << "zil_blk_id= " << zil_blk_id << ",  block_type::UB\n";
       }
       item->request->blk_type = blk_type;
+      int fs_id, attestation_id;
+      ::memcpy(&fs_id, stream->received_data.data() + sizeof(uint64_t) + k_commitment_sz + sizeof(int), sizeof(int));
+      ::memcpy(&attestation_id, stream->received_data.data() + sizeof(uint64_t) + k_commitment_sz + sizeof(int)*2, sizeof(int));
+      if (fs_id != registered_fs_id || attestation_id != registered_attestation_id)
+      {
+        std::cerr << __func__ << " fs_id or attestation_id mismatch, fs_id=" << fs_id << ", attestation_id=" << attestation_id << "\n";
+        // should abort the connection or return error message.
+      }
       #if 0
       uint64_t cmt[4];
       using u_longlong_t = long long unsigned;
