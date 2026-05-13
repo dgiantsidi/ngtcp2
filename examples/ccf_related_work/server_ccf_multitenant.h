@@ -104,9 +104,12 @@ struct ccf_callbacks_set {
     const std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)>
       replication_function,
     const std::function<uint64_t(std::weak_ptr<void>)> cmt_seqno_function =
+      nullptr, 
+    const std::function<void(std::weak_ptr<void>)> print_store =
       nullptr) {
     ccf_replicate = replication_function;
     ccf_committed_seqno = cmt_seqno_function;
+    ccf_print_store = print_store;
     driver = driver_;
   }
 
@@ -114,8 +117,14 @@ struct ccf_callbacks_set {
   std::function<uint64_t(std::weak_ptr<void>)> ccf_committed_seqno;
   std::function<void(std::weak_ptr<void>, uint64_t, uint8_t *, size_t)>
     ccf_replicate;
+  std::function<void(std::weak_ptr<void>)> ccf_print_store;
 
   uint64_t invoke_ccf_committed_seqno() { return ccf_committed_seqno(driver); }
+
+  void invoke_ccf_print_store() {
+    print_system::log_info("invoke_ccf_print_store called");
+    ccf_print_store(driver);
+  }
 
   void invoke_ccf_replicate(uint64_t req_id, uint8_t *data = nullptr,
                             size_t sz = 0) {
@@ -359,6 +368,12 @@ public:
     
     return committed_seqno;
   }
+
+  void ccf_print() {
+    print_system::log_info("ccf_print_store called");
+    ccf_callbacks->invoke_ccf_print_store();
+  }
+
 
   void register_ccf_functions(std::shared_ptr<ccf_callbacks_set> callbacks) {
     ccf_callbacks = callbacks;
