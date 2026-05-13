@@ -499,6 +499,9 @@ int Stream::start_response(nghttp3_conn *httpconn,
   if (method == "PUT")
     return send_status_response(httpconn, 200, {}, std::move(request));
 
+  if (method == "REGISTER")
+    return send_status_response(httpconn, 200, {}, std::move(request));
+
   if (uri.empty() || method.empty()) {
     return send_status_response(httpconn, 400);
   }
@@ -1379,7 +1382,7 @@ int Handler::http_end_stream(Stream *stream) {
     std::lock_guard<std::mutex> lock(ordering_mtx);
     item->request->request_id = request_counter;
     item->request->ts = util::timestamp();
-    request_counter.fetch_add(1);
+    request_counter.fetch_add(1); // no need to be atomic given the std::mutex
     // std::cout << __PRETTY_FUNCTION__ << " handler " << static_cast<void*>(this) << std::endl;
     int blk_type = -1;
     if (stream->received_data.size() > 0) {
