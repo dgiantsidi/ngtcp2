@@ -61,7 +61,7 @@ static uint64_t global_start_time_ns = 0;
 bool k_print_cmts = false;
 static int k_client_id = -1;
 static int k_attestation_id = -1;
-
+recv_cmt_msg_t *registration = nullptr;
 
 std::mutex ub_notification_mtx;
 uint64_t global_txg_ub = 0;
@@ -2073,6 +2073,7 @@ static void deserialize_and_print(const char *data, size_t size) {
 
 int Client::on_extend_max_streams() {
   // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  static bool registration_done = false;
   int64_t stream_id;
   static int64_t latest_sent_blk_id = 0;
 
@@ -2084,9 +2085,9 @@ int Client::on_extend_max_streams() {
   print_system::log_info(std::string(__func__) +
                          ": nstreams_done_=" + std::to_string(nstreams_done_));
 #endif
-  //
-  // std::cout << __func__ << " nstreams_done_=" << nstreams_done_ << "\n";
-  while (!recv_queue.empty()) {
+  
+
+  while (!recv_queue.empty() || registration_done == false) {
   //  for (; nstreams_done_ < config.nstreams; ++nstreams_done_){
   // if (nstreams_done_ < config.nstreams) 
 #if 0
@@ -2120,71 +2121,87 @@ int Client::on_extend_max_streams() {
 
     auto stream = std::make_unique<Stream>(
       config.requests[nstreams_done_ % config.requests.size()], stream_id);
-    recv_cmt_msg_t *last_cmt = recv_queue.pop();
-    if (last_cmt != nullptr) {
-      // stream->sent_data = std::to_string(last_cmt->blk_id);
-      int size_to_adjust = sizeof(uint64_t) /* ZIL tail_blk_id or ub_txg */ + COMMITMENT_SIZE /* tail cmt or head cmt*/ +
-                               sizeof(int) /* blk_type */ + sizeof(int) /* client_id */ + sizeof(int) /* attestation_id */;
-      if (last_cmt->blk_type == block_type::UB) {
-        size_to_adjust += sizeof(uint64_t) + UBERBLOCK_DIGEST_BUF_SIZE;  /* ZIL head_blk_id + ub cmt */
+    if (registration != nullptr && registration_done == false) {
+      std::cout << " ***************************************************************************************\n";
+      stream->sent_data.resize(sizeof(uint64_t)*2 + sizeof(int));
+      stream->method = "REGISTER";
+      ::memcpy(stream->sent_data.data(), &(registration->blk_id) /*client_id*/, sizeof(uint64_t));
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t), &(registration->zil_head_blk_id), sizeof(uint64_t));
+      int reg = block_type::REGISTRATION;
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + sizeof(uint64_t),
+               &reg, sizeof(int));
+      free(registration);
+      registration = nullptr;
+      registration_done = true;
+    }
+    else {
+      recv_cmt_msg_t *last_cmt = recv_queue.pop();
+      if (last_cmt != nullptr && last_cmt->blk_type != block_type::REGISTRATION) {
+        // stream->sent_data = std::to_string(last_cmt->blk_id);
+        int size_to_adjust = sizeof(uint64_t) /* ZIL tail_blk_id or ub_txg */ + COMMITMENT_SIZE /* tail cmt or head cmt*/ +
+                                sizeof(int) /* blk_type */ + sizeof(int) /* client_id */ + sizeof(int) /* attestation_id */;
+        if (last_cmt->blk_type == block_type::UB) {
+          size_to_adjust += sizeof(uint64_t) + UBERBLOCK_DIGEST_BUF_SIZE;  /* ZIL head_blk_id + ub cmt */
+        }
+        stream->sent_data.resize(size_to_adjust);
+        ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
+
+       /*
+        // todo: remove this on the actual system
+        uint64_t v1 = 0x007fc94a3c566541ULL;
+        uint64_t v2 = 0x0447623f4033ded1ULL;
+        uint64_t v3 = 0x1a3f55944a54357eULL;
+        uint64_t v4 = 0xfd9ed2fb493067e4ULL;
+
+        // uint64_t be = std::byteswap(v1);          // little-endian host ->
+        // big-endian
+        std::memcpy(last_cmt->tail_commitment, &v1, sizeof(uint64_t));
+        // be = std::byteswap(v2);
+        std::memcpy(last_cmt->tail_commitment + sizeof(uint64_t), &v2,
+                    sizeof(uint64_t));
+        // be = std::byteswap(v3);
+        std::memcpy(last_cmt->tail_commitment + 2 * sizeof(uint64_t), &v3,
+                    sizeof(uint64_t));
+        // be = std::byteswap(v4);
+        std::memcpy(last_cmt->tail_commitment + 3 * sizeof(uint64_t), &v4,
+                    sizeof(uint64_t));
+        */
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t),
+                last_cmt->tail_commitment, COMMITMENT_SIZE);
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
+                &(last_cmt->blk_type), sizeof(int));
+        auto tmp = (k_client_id == -1) ? 0 : k_client_id;
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int),
+                &tmp, sizeof(int));
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int),
+                &k_attestation_id, sizeof(int));
+        if (last_cmt->blk_type == block_type::UB) {
+          ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int) + sizeof(int),
+                  &(last_cmt->zil_head_blk_id), sizeof(uint64_t));
+          std::cout << "push -> zil_head_blk_id=" << last_cmt->zil_head_blk_id << "\n";
+          ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int) + sizeof(int) + sizeof(uint64_t),
+                  last_cmt->ub_digest, UBERBLOCK_DIGEST_BUF_SIZE);
+          deserialize_and_print(stream->sent_data.data(), stream->sent_data.size());
+        }
+        // std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
+        free(last_cmt);
       }
-      stream->sent_data.resize(size_to_adjust);
-      ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
+      else {
+        // return 0;
+        //  stream->sent_data = std::to_string(stream_id);
+        stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
+                                sizeof(int));
+        uint64_t blk = 0;
+        ::memcpy(stream->sent_data.data(), &stream_id, sizeof(uint64_t));
+        uint64_t v[4] = {0x007fc94a3c566541ULL, 0x0447623f4033ded1ULL,
+                        0x1a3f55944a54357eULL, 0xfd9ed2fb493067e4ULL};
 
-      #if 0
-      // todo: remove this on the actual system
-      uint64_t v1 = 0x007fc94a3c566541ULL;
-      uint64_t v2 = 0x0447623f4033ded1ULL;
-      uint64_t v3 = 0x1a3f55944a54357eULL;
-      uint64_t v4 = 0xfd9ed2fb493067e4ULL;
-
-      // uint64_t be = std::byteswap(v1);          // little-endian host ->
-      // big-endian
-      std::memcpy(last_cmt->tail_commitment, &v1, sizeof(uint64_t));
-      // be = std::byteswap(v2);
-      std::memcpy(last_cmt->tail_commitment + sizeof(uint64_t), &v2,
-                  sizeof(uint64_t));
-      // be = std::byteswap(v3);
-      std::memcpy(last_cmt->tail_commitment + 2 * sizeof(uint64_t), &v3,
-                  sizeof(uint64_t));
-      // be = std::byteswap(v4);
-      std::memcpy(last_cmt->tail_commitment + 3 * sizeof(uint64_t), &v4,
-                  sizeof(uint64_t));
-      #endif
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t),
-               last_cmt->tail_commitment, COMMITMENT_SIZE);
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
-               &(last_cmt->blk_type), sizeof(int));
-      auto tmp = (k_client_id == -1) ? 0 : k_client_id;
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int),
-               &tmp, sizeof(int));
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int),
-               &k_attestation_id, sizeof(int));
-      if (last_cmt->blk_type == block_type::UB) {
-        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int) + sizeof(int),
-                 &(last_cmt->zil_head_blk_id), sizeof(uint64_t));
-        std::cout << "push -> zil_head_blk_id=" << last_cmt->zil_head_blk_id << "\n";
-        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int) + sizeof(int) + sizeof(uint64_t),
-                 last_cmt->ub_digest, UBERBLOCK_DIGEST_BUF_SIZE);
-        deserialize_and_print(stream->sent_data.data(), stream->sent_data.size());
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t), v, COMMITMENT_SIZE);
+        int ub = block_type::UB;
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
+                &ub, sizeof(int));
+        //::memcpy(stream->sent_data.data(), &blk, sizeof(uint64_t));
       }
-      // std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
-      free(last_cmt);
-    } else {
-      // return 0;
-      //  stream->sent_data = std::to_string(stream_id);
-      stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
-                               sizeof(int));
-      uint64_t blk = 0;
-      ::memcpy(stream->sent_data.data(), &stream_id, sizeof(uint64_t));
-      uint64_t v[4] = {0x007fc94a3c566541ULL, 0x0447623f4033ded1ULL,
-                       0x1a3f55944a54357eULL, 0xfd9ed2fb493067e4ULL};
-
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t), v, COMMITMENT_SIZE);
-      int ub = block_type::UB;
-      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE,
-               &ub, sizeof(int));
-      //::memcpy(stream->sent_data.data(), &blk, sizeof(uint64_t));
     }
     stream->transmittion_timestamp = util::timestamp();
     if (global_start_time_ns == 0) {
@@ -2244,7 +2261,7 @@ int Client::submit_http_request(const Stream *stream) {
   config.datalen = stream->sent_data.size();
 
   std::array<nghttp3_nv, 6> nva{
-    util::make_nv_nn(":method", config.http_method),
+    util::make_nv_nn(":method", (stream->method == "REGISTER" ? "REGISTER" : config.http_method)),
     util::make_nv_nn(":scheme", req.scheme),
     util::make_nv_nn(":authority", req.authority),
     util::make_nv_nn(":path", req.path),
@@ -3718,7 +3735,7 @@ void zfs_userspace_client::get_commitment(
 
   recv_cmt_msg_t *recv_msg =
     deserialize_recv_cmt(reinterpret_cast<char *>(NLMSG_DATA(nlh)));
-  recv_msg->blk_type = TAIL;
+  recv_msg->blk_type = block_type::TAIL;
 
   // printf("received from kernel: {zil_blk_id=%ld, %s, cmt=%s}\n",
   //         recv_msg->blk_id, recv_msg->poolname, recv_msg->tail_commitment);
@@ -3745,7 +3762,7 @@ int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
     std::this_thread::sleep_for(std::chrono::microseconds(1000));
     recv_cmt_msg_t *recv_msg = new recv_cmt_msg_t();
     recv_msg->blk_id = idx;
-    recv_msg->blk_type = UB;
+    recv_msg->blk_type = block_type::UB;
     strncpy(recv_msg->poolname, poolname, ZFS_MAX_DATASET_NAME_LEN);
     recv_queue.push(recv_msg); // push the received message to the queue
 #endif
@@ -3842,7 +3859,7 @@ int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
 
     recv_cmt_msg_t *_recv_msg_ = new recv_cmt_msg_t();
     _recv_msg_->blk_id = ub_txg; // zil_head_blk_num;
-    _recv_msg_->blk_type = UB;
+    _recv_msg_->blk_type = block_type::UB;
     _recv_msg_->zil_head_blk_id = zil_head_blk_num;
     memcpy(_recv_msg_->ub_digest, ub_digest, sizeof(ub_digest)-1);
     memcpy(&(_recv_msg_->tail_commitment), head_digest, sizeof(head_digest));
@@ -4039,10 +4056,10 @@ int main(int argc, char **argv) {
       {"wait-for-ticket", no_argument, &flag, 41},
       {"initial-pkt-num", required_argument, &flag, 42},
       {"pmtud-probes", required_argument, &flag, 43},
-      {"poolname", required_argument, &flag, 44},
-      {"print_cmts", no_argument, &flag, 45},
-      {"client_id", required_argument, &flag, 46},
-      {"attestation_id", required_argument, &flag, 47},
+      {"print_cmts", no_argument, &flag, 44},
+      {"client_id", required_argument, &flag, 45},
+      {"attestation_id", required_argument, &flag, 46},
+      {"poolname", required_argument, &flag, 47},
       {},
     };
 
@@ -4486,7 +4503,8 @@ int main(int argc, char **argv) {
         }
         break;
       }
-      case 44: {
+      case 47: {
+        std::cout << "thread_func_get_cmt will be started for poolname: " << optarg << std::endl;
         zfs_client =
           std::make_unique<zfs_userspace_client>(static_cast<char *>(optarg));
 
@@ -4494,16 +4512,23 @@ int main(int argc, char **argv) {
         ub_thread = std::thread(ub_notification_thread);
         break;
       }
-      case 45: {
+      case 44: {
         k_print_cmts = true;
         break;
       }
-      case 46: {
+      case 45: {
         k_client_id = *util::parse_uint_iec(optarg);
         break;
       }
-      case 47: {
+      case 46: {
+        std::cout << "poolname: " << optarg << std::endl;
         k_attestation_id = *util::parse_uint_iec(optarg);
+        registration = new recv_cmt_msg_t();
+        registration->blk_id = k_client_id;
+        registration->zil_head_blk_id = k_attestation_id;
+        registration->blk_type = block_type::REGISTRATION;
+        std::cout << "Registration request for client_id=" << k_client_id
+                  << " attestation_id=" << k_attestation_id << std::endl;
         break;
       }
       }
@@ -4568,6 +4593,8 @@ int main(int argc, char **argv) {
   if (parse_requests(&argv[optind], argc - optind) != 0) {
     exit(EXIT_FAILURE);
   }
+
+ 
 
   if (!ngtcp2_is_reserved_version(config.version)) {
     if (!config.preferred_versions.empty() &&

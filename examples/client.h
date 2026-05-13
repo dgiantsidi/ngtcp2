@@ -79,6 +79,7 @@ struct Stream {
   int fd;
   std::string received_data;
   std::string sent_data;
+  std::string method;
   ngtcp2_tstamp transmittion_timestamp; // in nanoseconds
 };
 std::map<int64_t, std::unique_ptr<Stream>> streams_;
