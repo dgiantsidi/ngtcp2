@@ -2026,6 +2026,51 @@ int Client::make_stream_early() {
   return on_extend_max_streams();
 }
 
+
+static void deserialize_and_print(const char *data, size_t size) {
+   uint64_t zil_blk_id;
+    ::memcpy(&zil_blk_id, data, sizeof(uint64_t));
+    uint64_t cmt[4];
+    ::memcpy(cmt, data + sizeof(uint64_t), sizeof(cmt));
+
+    int commitment_type = -1;
+    ::memcpy(
+      &commitment_type, data + sizeof(uint64_t) + sizeof(cmt), sizeof(int));
+
+    // get the filesystem id
+    int fs_id = -1;
+    ::memcpy(
+      &fs_id, data + sizeof(uint64_t) + sizeof(cmt) + sizeof(int), sizeof(int));
+
+    // get the attestation report (denoted with an id), it is emphemeral to
+    // distinguish between different mounts of the filesystem
+    int attestation_id = -1;
+    ::memcpy(
+      &attestation_id,
+      data + sizeof(uint64_t) + sizeof(cmt) + 2 * sizeof(int),
+      sizeof(int));
+    char ub_digest[UBERBLOCK_DIGEST_BUF_SIZE];
+    uint64_t zil_head_blk_id;
+    if (commitment_type == (int)block_type::UB) { 
+      ::memcpy(&zil_head_blk_id, data + sizeof(uint64_t) + sizeof(cmt) + 3 * sizeof(int), sizeof(uint64_t));
+      ::memcpy(ub_digest, data + sizeof(uint64_t) + sizeof(cmt) + 3 * sizeof(int) + sizeof(uint64_t), (UBERBLOCK_DIGEST_BUF_SIZE-1));
+      ub_digest[UBERBLOCK_DIGEST_BUF_SIZE-1] = '\0';
+    }
+
+    std::cout << "Received commitment: zil_blk_id/ub_txg=" << zil_blk_id
+              << " cmt=[" << std::hex << cmt[0] << ":" << cmt[1] << ":"
+              << cmt[2] << ":" << cmt[3] << std::dec
+              << "] commitment_type=" << commitment_type
+              << " fs_id=" << fs_id
+              << " attestation_id=" << attestation_id;
+    if (commitment_type == (int)block_type::UB) {
+      std::cout << " zil_head_blk_id=" << zil_head_blk_id
+                << " ub_digest=" << ub_digest;
+    }
+    std::cout << "\n"; 
+}
+
+
 int Client::on_extend_max_streams() {
   // std::this_thread::sleep_for(std::chrono::milliseconds(10));
   int64_t stream_id;
@@ -2078,8 +2123,12 @@ int Client::on_extend_max_streams() {
     recv_cmt_msg_t *last_cmt = recv_queue.pop();
     if (last_cmt != nullptr) {
       // stream->sent_data = std::to_string(last_cmt->blk_id);
-      stream->sent_data.resize(sizeof(uint64_t) + COMMITMENT_SIZE +
-                               sizeof(int) + sizeof(int) + sizeof(int));
+      int size_to_adjust = sizeof(uint64_t) /* ZIL tail_blk_id or ub_txg */ + COMMITMENT_SIZE /* tail cmt or head cmt*/ +
+                               sizeof(int) /* blk_type */ + sizeof(int) /* client_id */ + sizeof(int) /* attestation_id */;
+      if (last_cmt->blk_type == block_type::UB) {
+        size_to_adjust += sizeof(uint64_t) + UBERBLOCK_DIGEST_BUF_SIZE;  /* ZIL head_blk_id + ub cmt */
+      }
+      stream->sent_data.resize(size_to_adjust);
       ::memcpy(stream->sent_data.data(), &last_cmt->blk_id, sizeof(uint64_t));
 
       #if 0
@@ -2109,8 +2158,16 @@ int Client::on_extend_max_streams() {
       auto tmp = (k_client_id == -1) ? 0 : k_client_id;
       ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int),
                &tmp, sizeof(int));
-       ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int),
+      ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int),
                &k_attestation_id, sizeof(int));
+      if (last_cmt->blk_type == block_type::UB) {
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int) + sizeof(int),
+                 &(last_cmt->zil_head_blk_id), sizeof(uint64_t));
+        std::cout << "push -> zil_head_blk_id=" << last_cmt->zil_head_blk_id << "\n";
+        ::memcpy(stream->sent_data.data() + sizeof(uint64_t) + COMMITMENT_SIZE + sizeof(int) + sizeof(int) + sizeof(int) + sizeof(uint64_t),
+                 last_cmt->ub_digest, UBERBLOCK_DIGEST_BUF_SIZE);
+        deserialize_and_print(stream->sent_data.data(), stream->sent_data.size());
+      }
       // std::cout << __func__ << " submit: blk_id=" << last_cmt->blk_id << ", blk_type=" << last_cmt->blk_type << "\n";
       free(last_cmt);
     } else {
@@ -3760,6 +3817,9 @@ int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
   if (ub_txg != prev_ub_txg)
     printf("ub_txg=%llu, offset=%llu\n", (u_longlong_t)ub_txg,
            (u_longlong_t)offset);
+  char ub_digest[UBERBLOCK_DIGEST_BUF_SIZE];
+  memcpy(ub_digest, recv_msg.get() + offset, sizeof(ub_digest)-1);
+  
   offset += 65;
   memcpy(&zil_head_blk_num, recv_msg.get() + offset, sizeof(zil_head_blk_num));
   offset += sizeof(zil_head_blk_num);
@@ -3769,10 +3829,12 @@ int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
            (u_longlong_t)offset);
   memcpy(head_digest, recv_msg.get() + offset, sizeof(head_digest));
   offset += sizeof(head_digest);
-  if (zil_head_blk_num != prev_zil_head_blk_num)
+  if (zil_head_blk_num != prev_zil_head_blk_num) {
+    printf("Hash digest of the new uberblock %s\n", ub_digest);
     printf("head_digest=%016llx:%016llx:%016llx:%016llx\n",
            (u_longlong_t)head_digest[0], (u_longlong_t)head_digest[1],
            (u_longlong_t)head_digest[2], (u_longlong_t)head_digest[3]);
+  }
 
   
   int ret_val = 0;
@@ -3781,6 +3843,8 @@ int zfs_ub_userspace_client::get_commitment(int kernel_endpoint,
     recv_cmt_msg_t *_recv_msg_ = new recv_cmt_msg_t();
     _recv_msg_->blk_id = ub_txg; // zil_head_blk_num;
     _recv_msg_->blk_type = UB;
+    _recv_msg_->zil_head_blk_id = zil_head_blk_num;
+    memcpy(_recv_msg_->ub_digest, ub_digest, sizeof(ub_digest)-1);
     memcpy(&(_recv_msg_->tail_commitment), head_digest, sizeof(head_digest));
     printf("push at the queue: ub_txg=%llu zil_head_blk_num=%llu (%016llx)\n",
           (u_longlong_t)ub_txg,
