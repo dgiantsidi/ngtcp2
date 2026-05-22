@@ -49,9 +49,9 @@
 #include "shared.h"
 #include "template.h"
 #include <thread>
-#include "/home/azureuser/genltest/prototype/config_c.h"
-#include "/home/azureuser/genltest/prototype/msg_processing_functions.h"
-#include "/home/azureuser/genltest/prototype/fifo_queue.hpp"
+#include "../../genltest/prototype/config_c.h"
+#include "../../genltest/prototype/msg_processing_functions.h"
+#include "../../genltest/prototype/fifo_queue.hpp"
 
 using namespace ngtcp2;
 
@@ -274,7 +274,7 @@ void log(const std::string_view &msg) {
 }
 
 void log_error(const std::string_view &msg) {
-  // std::cerr << "*==== ERROR ====* " << msg << std::endl;
+  std::cerr << "*==== ERROR ====* " << msg << std::endl;
 }
 } // namespace print_system
 
